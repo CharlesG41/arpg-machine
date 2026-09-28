@@ -50,6 +50,11 @@ cargo run --release --example catalogue
   niveaux sur la première map, puis 1 niveau toutes les 1 ou 2 maps. La
   capacité d'artefacts suit le niveau (2 au niveau 1, puis 3/4/5/6/7 aux
   niveaux 5/10/18/28/40). Le bouton « +1 lvl » sert aux tests.
+- **Sauvegarde** : le personnage (niveau, XP, arbre, loadout, tier) est
+  sauvegardé automatiquement à chaque changement dans
+  `~/.arpg-machine/character.txt`, et rechargé au lancement. « New character »
+  le remplace. Les lancements de débogage (variables `ARPG_*`) ne lisent ni
+  n'écrivent la sauvegarde.
 - **Découverte de l'arbre** : on ne voit que ses nœuds et ceux juste à côté ;
   des amorces de lignes montrent qu'il y a autre chose plus loin. Au moins 4
   des 6 sorties de l'Origin font des dégâts.

@@ -184,6 +184,31 @@ impl SkillTree {
         self.acquired[id] || self.nodes[id].neighbors.iter().any(|&n| self.acquired[n])
     }
 
+    /// Rebuilds a saved tree: same seed, owned nodes restored. Nodes that no
+    /// longer connect to the Origin (or exceed the points) are dropped.
+    pub fn restore(seed: u64, points: u32, owned: &[usize]) -> Self {
+        let mut tree = SkillTree::generate(seed, points);
+        for &id in owned {
+            if id < tree.nodes.len() {
+                tree.acquired[id] = true;
+            }
+        }
+        let mut connected = vec![false; tree.nodes.len()];
+        connected[ORIGIN] = true;
+        let mut stack = vec![ORIGIN];
+        while let Some(n) = stack.pop() {
+            for &m in &tree.nodes[n].neighbors {
+                if tree.acquired[m] && !connected[m] {
+                    connected[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        tree.acquired = connected;
+        tree.set_points(points);
+        tree
+    }
+
     pub fn spent(&self) -> u32 {
         self.acquired.iter().filter(|&&a| a).count() as u32 - 1
     }
@@ -370,6 +395,20 @@ mod tests {
         assert!(tree.acquire(exits[0]));
         let after = (1..tree.nodes.len()).filter(|&i| !tree.visible(i)).count();
         assert!(after < hidden);
+    }
+
+    #[test]
+    fn restore_keeps_connected_owned_nodes_only() {
+        let mut tree = SkillTree::generate(9, 20);
+        let far = (1..tree.nodes.len()).find(|&i| tree.route_to(i).unwrap().len() == 3).unwrap();
+        tree.acquire(far);
+        let owned: Vec<usize> = (1..tree.nodes.len()).filter(|&i| tree.acquired[i]).collect();
+        let restored = SkillTree::restore(9, 20, &owned);
+        assert_eq!(restored.acquired, tree.acquired);
+        // A node with no owned path to the Origin is dropped.
+        let lonely = (1..tree.nodes.len()).find(|&i| tree.route_to(i).is_some_and(|r| r.len() >= 2)).unwrap();
+        let broken = SkillTree::restore(9, 20, &[lonely]);
+        assert!(!broken.acquired[lonely]);
     }
 
     #[test]

@@ -167,6 +167,25 @@ impl Planner {
         self.notice = Some((message.to_string(), 3.0));
     }
 
+    /// The planner for a saved character.
+    pub fn from_save(save: &arpg_machine::save::CharacterSave) -> Self {
+        let mut planner = Planner::new(save.tree_seed);
+        planner.character = save.character;
+        planner.tree = SkillTree::restore(save.tree_seed, save.character.skill_points(), &save.acquired);
+        planner.sandbox = save.sandbox;
+        planner.build.slots = save.slots.clone();
+        planner.build.artifacts = save.artifacts.clone();
+        planner.tier = save.tier;
+        planner.sync_character();
+        planner.tab = if planner.build.slots.is_empty() { Tab::Tree } else { Tab::Loadout };
+        planner
+    }
+
+    /// Text of the current character's save; the caller writes it when it changes.
+    pub fn save_text(&self) -> String {
+        arpg_machine::save::CharacterSave::capture(self.character, &self.tree, &self.build, self.sandbox, self.tier).to_text()
+    }
+
     /// A fresh level-1 character with a new tree.
     pub fn new_character(&mut self) {
         self.character = Character::default();

@@ -11,6 +11,7 @@ pub mod content;
 pub mod grid;
 pub mod math;
 pub mod rng;
+pub mod save;
 pub mod spells;
 pub mod tree;
 pub mod world;

@@ -66,7 +66,13 @@ async fn main() {
     let font = load_ttf_font_from_bytes(include_bytes!("../assets/Barlow-SemiBold.ttf")).expect("bundled Barlow font");
     let ui = Ui { font };
     let env = |k: &str| std::env::var(k).ok();
-    let mut planner = Planner::new(1);
+    // Debug runs (screenshots, presets) never touch your saved character.
+    let debug_run = ["ARPG_SHOT", "ARPG_PRESET", "ARPG_PLAN", "ARPG_TREE_DEMO", "ARPG_AUTOPILOT"].iter().any(|k| env(k).is_some());
+    let mut planner = match (debug_run, arpg_machine::save::CharacterSave::load()) {
+        (false, Some(save)) => Planner::from_save(&save),
+        _ => Planner::new(1),
+    };
+    let mut saved_text = planner.save_text();
     let mut map_seed = 1u64;
     let mut screen = Screen::Plan;
     let mut world: Option<World> = None;
@@ -189,6 +195,14 @@ async fn main() {
                         ResultAction::None => {}
                     }
                 }
+            }
+        }
+        // Autosave whenever the character changes (level, tree, loadout, tier).
+        if !debug_run {
+            let text = planner.save_text();
+            if text != saved_text {
+                arpg_machine::save::CharacterSave::save_text(&text);
+                saved_text = text;
             }
         }
         if let Some(path) = &shot_path {
