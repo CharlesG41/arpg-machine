@@ -9,14 +9,25 @@ satisfaisant?
 ## Lancer
 
 ```
-cargo run --release
+cd ~/Documents/ChatGPT/arpg-machine && cargo run --release
 ```
 
+Planification :
+- **Skill Tree** : clic gauche pour acheter la route vers un nœud, clic droit
+  pour rembourser (gratuit), glisser pour déplacer, molette pour zoomer.
+  « New character » génère un nouvel arbre.
+- **Loadout** : glisser-déposer les sorts sur la barre de sorts, les supports
+  dans le socket d'un sort, et les artefacts sur la barre d'artefacts. Glisser
+  une carte hors de sa barre la retire. Un clic sur un sort ou un artefact
+  l'ajoute au bout.
+- Tab : changer d'onglet. Entrée : jouer.
+
+En map :
 - WASD / ZQSD / flèches : bouger
 - Espace (ou Maj) : dash
 - Tab : tableau des dégâts par sort
 - F2 : autopilote (le jeu joue tout seul)
-- Échap : retour au build
+- Échap : retour à la planification
 
 Benchmark sans fenêtre (tous les builds prêts, 5 seeds, autopilote) :
 
@@ -26,30 +37,41 @@ cargo run --release --example bench [tier]
 
 ## Contenu
 
-- **Une map** de 4200 × 4200 générée à partir d'une seed, avec environ 110 packs.
-  Les kills remplissent une barre (500 points, rares = 6). À 100 %, le boss
-  apparaît.
-- **Barre de 6 slots** avec les tailles 1–2 et l'adjacence gauche/droite.
-- **6 sorts**, un par forme de ciblage :
-  - Arcane Bolt : projectile, l'ennemi le plus proche ;
-  - Chain Lightning : chaîne, le plus proche puis 3 sauts ;
-  - Frost Nova : nova autour de toi, Chill ;
-  - Flame Breath (taille 2) : cône vers le plus proche, Burn ;
-  - Venom Pool (taille 2) : zone au sol sur le pack le plus dense,
-    Poison ;
-  - Orbiting Blades : orbite permanente.
+- **Skill tree** généré à partir d'une seed, sur le modèle de God Tower : une
+  Origin, 6 sorties, une grappe de 5 sorts derrière chaque sortie, et des ponts
+  entre grappes voisines. Chaque sort apparaît une seule fois ; seule la
+  disposition change. Acheter un nœud achète le chemin le plus court depuis ce
+  qu'on possède déjà, 1 point par nœud. Rembourser un nœud rembourse aussi ce
+  qui ne tient plus à l'Origin. 14 points par défaut (réglable : ça remplace
+  les niveaux).
+- **63 sorts adaptés du catalogue de God Tower**, dans les 15 familles (voir
+  [spell-adaptation.md](spell-adaptation.md)). Chaque sort = une livraison
+  (projectile, chaîne, nova, cône, blast, zone, orbite, sur soi) + ses effets
+  de God Tower. Les descriptions sont générées à partir des chiffres.
+- **Stats** : AD, AP, PR (résistance physique), MR (résistance magique), PV.
+  Base : 30 AD, 30 AP, 20 PR, 20 MR, 300 PV. Dégâts réduits par
+  100 / (100 + résistance).
+- **Barre de 8 slots** (tailles 1–3, adjacence gauche/droite) et **barre
+  d'artefacts de 5** de capacité (tailles 1–2).
 - **8 supports**, une fois chacun par build : Multishot, Pierce, Amplify,
-  Contagion (le Poison se propage à la mort), Combustion (les ennemis qui
-  brûlent explosent), Frenzy (momentum : cap de 20 stacks et décroissance en
-  2 s), Hunter (ciblage boss → rares → le plus proche), Echo (se lance avec le
-  sort de gauche).
-- **Anti-overkill** : les projectiles ne visent pas un ennemi que les dégâts
-  en route vont déjà tuer.
-- **Dash** : le slot de mouvement manuel (sans support dans le prototype).
-- **Boss : Ember Warden.** Cercles de feu télégraphiés (positionnement).
-  À 50 % de PV : immunisé au Burn pendant 15 s, et 3 vagues d'adds (test du
-  build).
-- **4 builds prêts** pour comparer : Starter, Contagion, Combustion, Frenzy.
+  Contagion, Combustion, Frenzy, Hunter, Echo.
+- **16 artefacts**, dont 4 de stats (Sage's Ring +15 AP, Warband +15 AD, Iron
+  Plate +25 PR, Spirit Veil +25 MR).
+- **Mode sandbox** : tous les sorts, sans l'arbre. Les 4 builds prêts (Starter,
+  Plague, Inferno, Steel) l'activent.
+- **Une map** de 4200 × 4200 avec environ 110 packs. Les kills remplissent
+  une barre de 500 points. À 100 %, le boss apparaît.
+- **Ennemis** (des formes géométriques), avec leurs résistances (PR / MR) :
+  - carré (Grunt), 0 / 0 : fonce sur toi ;
+  - triangle (Runner), 0 / 0 : rapide et fragile ;
+  - pentagone (Caster), 0 / 30 : garde ses distances et tire des orbes lents
+    (magiques) qu'on peut esquiver ;
+  - hexagone (Brute, rare), 30 / 0 : quand tu es proche, il prépare un slam au
+    sol télégraphié (0,9 s) ;
+  - octogone (boss). Chaque boss a ses propres stats : l'Ember Warden a
+    4000 PV, 25 PR, 40 MR. Cercles de feu télégraphiés ; à 50 % de PV,
+    immunisé au Burn 15 s et 3 vagues d'adds.
+- **Anti-overkill**, **momentum** (cap 20, décroissance 2 s), **Barrier**.
 - **Tier** : +30 % PV et +20 % dégâts des ennemis par tier.
 
 ## Architecture
@@ -61,17 +83,19 @@ cargo run --release --example bench [tier]
 - `src/render.rs` : tout le visuel (silhouettes, particules, flashs,
   secousses), construit à partir de l'état et des événements. On peut le
   remplacer sans toucher aux règles (décision de direction artistique).
-- `src/ui.rs` : écran de build, HUD, écran de résultat.
+- `src/tree.rs` (lib) : génération et règles du skill tree.
+- `src/planner.rs` : écrans Skill Tree et Loadout (glisser-déposer).
+- `src/ui.rs` : HUD et écran de résultat.
 - `examples/bench.rs` : benchmark sans fenêtre.
 
-## Premiers chiffres (autopilote, tier 0, 5 seeds)
+## Chiffres (autopilote, tier 0, 5 seeds)
 
 | Build | Clear | Boss | Victoires | Pic kills/min |
 |---|---|---|---|---|
-| Starter | ~2 min 35 | — | 0/5 | ~450 |
-| Contagion | ~28 s | ~35 s | 5/5 | ~1700 |
-| Combustion | ~33 s | ~32 s | 5/5 | ~1400 |
-| Frenzy | ~32 s | ~36 s | 5/5 | ~1600 |
+| Starter (3 sorts, aucun support) | ~3 min | — | 0/5 | ~130 |
+| Plague | ~19 s | ~14 s | 5/5 | ~2200 |
+| Inferno | ~22 s | ~31 s | 5/5 | ~1600 |
+| Steel | ~33 s | ~23 s | 5/5 | ~1200 |
 
 - L'écart entre un build qui click et un build de départ est énorme :
   environ 4 fois plus de kills par minute et un clear 5 fois plus rapide.
@@ -86,5 +110,6 @@ cargo run --release --example bench [tier]
 
 ## Pas dans le prototype
 
-Niveaux, arbre, artefacts, loot, légendaires, supports sur le dash,
-modificateurs de map, plusieurs boss.
+Niveaux (remplacés par le réglage de points), portail de l'arbre, loot et
+drops, fusion, légendaires, supports sur le dash, modificateurs de map,
+plusieurs boss.

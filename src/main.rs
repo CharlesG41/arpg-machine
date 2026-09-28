@@ -1,10 +1,13 @@
 //! ARPG Machine prototype window.
 //!
 //! Debug environment variables (used for automated screenshots):
-//! - `ARPG_PRESET=<name>`: skip the build screen and start with that preset.
+//! - `ARPG_PRESET=<name>`: skip planning and start a map with that preset.
+//! - `ARPG_PLAN=<name>`: open the loadout with that preset loaded.
+//! - `ARPG_TREE_DEMO=<n>`: open the skill tree with n routes already bought.
 //! - `ARPG_AUTOPILOT=1`: let the autopilot move.
 //! - `ARPG_SHOT=<path.png>` and `ARPG_SHOT_AT=<seconds>`: save a screenshot
 //!   after that much time on the current screen, then quit.
+mod planner;
 mod render;
 mod ui;
 
@@ -13,7 +16,8 @@ use arpg_machine::math::V2;
 use arpg_machine::world::{autopilot, Input, Phase, World, DT};
 use macroquad::prelude::*;
 use render::Fx;
-use ui::{BuildAction, BuildState, ResultAction, Ui};
+use planner::{PlanAction, Planner, Tab};
+use ui::{ResultAction, Ui};
 
 fn conf() -> Conf {
     Conf {
@@ -27,7 +31,7 @@ fn conf() -> Conf {
 }
 
 enum Screen {
-    Build,
+    Plan,
     Play,
     Result,
 }
@@ -62,8 +66,9 @@ async fn main() {
     let font = load_ttf_font_from_bytes(include_bytes!("../assets/Barlow-SemiBold.ttf")).expect("bundled Barlow font");
     let ui = Ui { font };
     let env = |k: &str| std::env::var(k).ok();
-    let mut state = BuildState { build: presets()[1].1.clone(), selected: None, tier: 0, seed: 1 };
-    let mut screen = Screen::Build;
+    let mut planner = Planner::new(1);
+    let mut map_seed = 1u64;
+    let mut screen = Screen::Plan;
     let mut world: Option<World> = None;
     let mut fx = Fx::new();
     let mut accumulator = 0.0f32;
@@ -75,11 +80,25 @@ async fn main() {
     let shot_at: f32 = env("ARPG_SHOT_AT").and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let mut screen_time = 0.0f32;
 
-    if let Some(name) = env("ARPG_PRESET") {
-        if let Some((_, build)) = presets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(&name)) {
-            state.build = build;
-            world = Some(World::new(state.build.clone(), state.seed, state.tier));
-            screen = Screen::Play;
+    let find_preset = |name: &str| presets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|p| p.1);
+    if let Some(build) = env("ARPG_PRESET").and_then(|n| find_preset(&n)) {
+        planner.load_preset(build);
+        world = Some(World::new(planner.build.clone(), map_seed, planner.tier));
+        screen = Screen::Play;
+    }
+    if let Some(build) = env("ARPG_PLAN").and_then(|n| find_preset(&n)) {
+        planner.load_preset(build);
+        planner.tab = Tab::Loadout;
+    }
+    if let Some(n) = env("ARPG_TREE_DEMO").and_then(|n| n.parse::<usize>().ok()) {
+        // Buy a few routes toward far nodes, then put the learned spells on the bar.
+        for k in 0..n {
+            let target = (1..planner.tree.nodes.len()).rev().nth(k * 7).unwrap_or(1);
+            let _ = planner.tree.acquire(target);
+        }
+        for spell in planner.tree.acquired_spells().into_iter().take(3) {
+            let end = planner.build.slots.len();
+            planner.build.place_spell(spell, end);
         }
     }
 
@@ -88,9 +107,9 @@ async fn main() {
         screen_time += frame;
         clear_background(render::BACKGROUND);
         match screen {
-            Screen::Build => {
-                if let BuildAction::Play = ui::build_screen(&ui, &mut state) {
-                    world = Some(World::new(state.build.clone(), state.seed, state.tier));
+            Screen::Plan => {
+                if let PlanAction::Play = planner.draw(&ui) {
+                    world = Some(World::new(planner.build.clone(), map_seed, planner.tier));
                     fx = Fx::new();
                     accumulator = 0.0;
                     result_delay = 0.0;
@@ -102,7 +121,7 @@ async fn main() {
                 let w = world.as_mut().expect("a map is running");
                 if matches!(screen, Screen::Play) {
                     if is_key_pressed(KeyCode::Escape) {
-                        screen = Screen::Build;
+                        screen = Screen::Plan;
                         next_frame().await;
                         continue;
                     }
@@ -143,13 +162,13 @@ async fn main() {
                 if matches!(screen, Screen::Result) {
                     match ui::result_panel(&ui, w) {
                         ResultAction::Replay => {
-                            state.seed = state.seed.wrapping_add(1);
-                            *w = World::new(state.build.clone(), state.seed, state.tier);
+                            map_seed = map_seed.wrapping_add(1);
+                            *w = World::new(planner.build.clone(), map_seed, planner.tier);
                             fx = Fx::new();
                             result_delay = 0.0;
                             screen = Screen::Play;
                         }
-                        ResultAction::Edit => screen = Screen::Build,
+                        ResultAction::Edit => screen = Screen::Plan,
                         ResultAction::None => {}
                     }
                 }

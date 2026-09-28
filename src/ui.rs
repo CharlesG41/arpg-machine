@@ -1,16 +1,16 @@
-//! Screen-space interface: build screen, in-map HUD, result panel.
-use crate::render::element_color;
-use arpg_machine::content::{presets, Build, SpellKind, SupportKind};
-use arpg_machine::world::{Phase, World, DASH_COOLDOWN, MOMENTUM_MAX, PROGRESS_NEEDED};
+//! Shared interface helpers, the in-map HUD and the result panel.
+use crate::render::family_color;
+use arpg_machine::world::{Phase, World, MOMENTUM_MAX, PROGRESS_NEEDED};
 use macroquad::prelude::*;
 
-const PANEL: Color = Color::new(0.08, 0.09, 0.12, 0.92);
-const PANEL_HOVER: Color = Color::new(0.13, 0.14, 0.19, 0.95);
-const BORDER: Color = Color::new(0.25, 0.27, 0.35, 1.0);
-const TEXT: Color = Color::new(0.9, 0.92, 0.96, 1.0);
-const MUTED: Color = Color::new(0.55, 0.58, 0.66, 1.0);
-const ACCENT: Color = Color::new(1.0, 0.78, 0.3, 1.0);
-const DANGER: Color = Color::new(0.95, 0.3, 0.3, 1.0);
+pub const PANEL: Color = Color::new(0.08, 0.09, 0.12, 0.94);
+pub const PANEL_HOVER: Color = Color::new(0.13, 0.14, 0.19, 0.96);
+pub const BORDER: Color = Color::new(0.25, 0.27, 0.35, 1.0);
+pub const TEXT: Color = Color::new(0.9, 0.92, 0.96, 1.0);
+pub const MUTED: Color = Color::new(0.55, 0.58, 0.66, 1.0);
+pub const ACCENT: Color = Color::new(1.0, 0.78, 0.3, 1.0);
+pub const DANGER: Color = Color::new(0.95, 0.3, 0.3, 1.0);
+pub const GOOD: Color = Color::new(0.45, 0.9, 0.55, 1.0);
 
 pub struct Ui {
     pub font: Font,
@@ -21,22 +21,28 @@ impl Ui {
         draw_text_ex(s, x, y, TextParams { font: Some(&self.font), font_size: size, color, ..Default::default() });
     }
 
+    /// Text drawn at a fixed raster size and scaled, so zooming the tree does not
+    /// rasterize a new glyph size every frame.
+    pub fn text_scaled(&self, s: &str, x: f32, y: f32, size: u16, scale: f32, color: Color) {
+        draw_text_ex(s, x, y, TextParams { font: Some(&self.font), font_size: size, font_scale: scale, color, ..Default::default() });
+    }
+
     pub fn width(&self, s: &str, size: u16) -> f32 {
         measure_text(s, Some(&self.font), size, 1.0).width
     }
 
-    fn centered(&self, s: &str, cx: f32, y: f32, size: u16, color: Color) {
+    pub fn centered(&self, s: &str, cx: f32, y: f32, size: u16, color: Color) {
         self.text(s, cx - self.width(s, size) / 2.0, y, size, color);
     }
 
     /// Word-wrapped text; returns the y after the last line.
-    fn wrapped(&self, s: &str, x: f32, mut y: f32, max_w: f32, size: u16, color: Color) -> f32 {
+    pub fn wrapped(&self, s: &str, x: f32, mut y: f32, max_w: f32, size: u16, color: Color) -> f32 {
         let mut line = String::new();
         for word in s.split_whitespace() {
             let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
             if self.width(&candidate, size) > max_w && !line.is_empty() {
                 self.text(&line, x, y, size, color);
-                y += size as f32 * 1.2;
+                y += size as f32 * 1.25;
                 line = word.to_string();
             } else {
                 line = candidate;
@@ -44,12 +50,12 @@ impl Ui {
         }
         if !line.is_empty() {
             self.text(&line, x, y, size, color);
-            y += size as f32 * 1.2;
+            y += size as f32 * 1.25;
         }
         y
     }
 
-    fn button(&self, r: Rect, label: &str, enabled: bool, active: bool) -> bool {
+    pub fn button(&self, r: Rect, label: &str, enabled: bool, active: bool) -> bool {
         let hover = enabled && r.contains(mouse_position().into());
         let fill = if active { Color::new(0.24, 0.2, 0.1, 0.95) } else if hover { PANEL_HOVER } else { PANEL };
         draw_rectangle(r.x, r.y, r.w, r.h, fill);
@@ -59,182 +65,6 @@ impl Ui {
         self.text(label, r.x + (r.w - self.width(label, size)) / 2.0, r.y + r.h / 2.0 + 6.0, size, color);
         hover && is_mouse_button_pressed(MouseButton::Left)
     }
-}
-
-pub struct BuildState {
-    pub build: Build,
-    pub selected: Option<usize>,
-    pub tier: u32,
-    pub seed: u64,
-}
-
-pub enum BuildAction {
-    None,
-    Play,
-}
-
-pub fn build_screen(ui: &Ui, st: &mut BuildState) -> BuildAction {
-    let (w, h) = (screen_width(), screen_height());
-    ui.text("ARPG Machine", 40.0, 60.0, 40, TEXT);
-    ui.text("Prototype: can a build click?", 40.0, 92.0, 20, MUTED);
-
-    // Presets.
-    let mut x = 40.0;
-    ui.text("Ready builds:", x, 138.0, 18, MUTED);
-    x += 120.0;
-    for (name, preset) in presets() {
-        let r = Rect::new(x, 116.0, 130.0, 34.0);
-        if ui.button(r, name, true, st.build == preset) {
-            st.build = preset;
-            st.selected = None;
-        }
-        x += 140.0;
-    }
-
-    let col_w = (w - 120.0) / 3.0;
-    let top = 180.0;
-
-    // Spells.
-    ui.text("Spells (click: add to the bar)", 40.0, top, 20, ACCENT);
-    let mut y = top + 16.0;
-    for spell in SpellKind::ALL {
-        let r = Rect::new(40.0, y, col_w, 70.0);
-        let in_bar = st.build.contains(spell);
-        let can = st.build.can_add(spell);
-        let hover = r.contains(mouse_position().into());
-        draw_rectangle(r.x, r.y, r.w, r.h, if hover && can { PANEL_HOVER } else { PANEL });
-        draw_rectangle(r.x, r.y, 5.0, r.h, element_color(spell.element()));
-        let color = if can || in_bar { TEXT } else { MUTED };
-        ui.text(&format!("{}   [size {}]", spell.name(), spell.size()), r.x + 16.0, r.y + 24.0, 20, color);
-        ui.wrapped(spell.description(), r.x + 16.0, r.y + 46.0, r.w - 30.0, 16, MUTED);
-        if in_bar {
-            ui.text("on the bar", r.right() - 90.0, r.y + 24.0, 16, ACCENT);
-        }
-        if hover && can && is_mouse_button_pressed(MouseButton::Left) {
-            st.build.add(spell);
-            st.selected = Some(st.build.slots.len() - 1);
-        }
-        y += 78.0;
-    }
-
-    // Bar.
-    let bx = 60.0 + col_w;
-    ui.text(&format!("Bar ({} / {})", st.build.used(), st.build.capacity), bx, top, 20, ACCENT);
-    let unit = (col_w - 10.0) / st.build.capacity as f32;
-    let mut sx = bx;
-    let mut clicked_slot = None;
-    for (i, slot) in st.build.slots.iter().enumerate() {
-        let r = Rect::new(sx, top + 16.0, unit * slot.spell.size() as f32 - 6.0, 130.0);
-        let selected = st.selected == Some(i);
-        let hover = r.contains(mouse_position().into());
-        draw_rectangle(r.x, r.y, r.w, r.h, if hover { PANEL_HOVER } else { PANEL });
-        draw_rectangle(r.x, r.y, r.w, 5.0, element_color(slot.spell.element()));
-        draw_rectangle_lines(r.x, r.y, r.w, r.h, if selected { 3.0 } else { 1.0 }, if selected { ACCENT } else { BORDER });
-        ui.wrapped(slot.spell.name(), r.x + 8.0, r.y + 28.0, r.w - 16.0, 17, TEXT);
-        // The support sits on the bottom edge so long names wrapping above never reach it.
-        let support = slot.support.map_or("no support", |s| s.name());
-        ui.text(support, r.x + 8.0, r.bottom() - 12.0, 14, if slot.support.is_some() { ACCENT } else { MUTED });
-        if hover && is_mouse_button_pressed(MouseButton::Left) {
-            clicked_slot = Some(i);
-        }
-        sx += unit * slot.spell.size() as f32;
-    }
-    for k in st.build.used()..st.build.capacity {
-        let r = Rect::new(bx + unit * k as f32, top + 16.0, unit - 6.0, 130.0);
-        draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.2, 0.21, 0.26, 1.0));
-    }
-    if let Some(i) = clicked_slot {
-        st.selected = if st.selected == Some(i) { None } else { Some(i) };
-    }
-    let mut info_y = top + 180.0;
-    if let Some(i) = st.selected.filter(|&i| i < st.build.slots.len()) {
-        let by = info_y;
-        if ui.button(Rect::new(bx, by, 60.0, 34.0), "<", i > 0, false) {
-            st.build.slots.swap(i, i - 1);
-            st.selected = Some(i - 1);
-        }
-        if ui.button(Rect::new(bx + 70.0, by, 60.0, 34.0), ">", i + 1 < st.build.slots.len(), false) {
-            st.build.slots.swap(i, i + 1);
-            st.selected = Some(i + 1);
-        }
-        if ui.button(Rect::new(bx + 140.0, by, 110.0, 34.0), "Remove", true, false) {
-            st.build.slots.remove(i);
-            st.selected = None;
-        }
-        info_y += 50.0;
-    }
-    info_y = ui.wrapped(
-        "Click a spell on the bar to select it, then a support on the right to socket it. \
-         Order matters: Echo reads the spell to its left. Each support can be used once per build.",
-        bx,
-        info_y + 10.0,
-        col_w - 10.0,
-        16,
-        MUTED,
-    );
-
-    // Tier and seed.
-    let ty = info_y + 30.0;
-    ui.text(&format!("Tier {}", st.tier), bx, ty + 22.0, 22, TEXT);
-    if ui.button(Rect::new(bx + 90.0, ty, 40.0, 34.0), "-", st.tier > 0, false) {
-        st.tier -= 1;
-    }
-    if ui.button(Rect::new(bx + 140.0, ty, 40.0, 34.0), "+", true, false) {
-        st.tier += 1;
-    }
-    ui.text(&format!("Seed {}", st.seed), bx, ty + 72.0, 20, MUTED);
-    if ui.button(Rect::new(bx + 160.0, ty + 50.0, 140.0, 34.0), "New seed", true, false) {
-        st.seed = macroquad::rand::rand() as u64 % 100_000;
-    }
-
-    // Supports.
-    let sx0 = 80.0 + col_w * 2.0;
-    let target = st.selected.and_then(|i| st.build.slots.get(i).map(|s| (i, s.spell, s.support)));
-    ui.text(
-        &match target {
-            Some((_, spell, _)) => format!("Supports for {}", spell.name()),
-            None => "Supports (select a spell first)".to_string(),
-        },
-        sx0,
-        top,
-        20,
-        ACCENT,
-    );
-    let mut y = top + 16.0;
-    for support in SupportKind::ALL {
-        let r = Rect::new(sx0, y, col_w, 70.0);
-        let fits = target.is_some_and(|(_, spell, _)| support.fits(spell));
-        let on_target = target.is_some_and(|(_, _, s)| s == Some(support));
-        let used = st.build.support_used(support);
-        let hover = r.contains(mouse_position().into());
-        draw_rectangle(r.x, r.y, r.w, r.h, if hover && fits { PANEL_HOVER } else { PANEL });
-        draw_rectangle_lines(r.x, r.y, r.w, r.h, if on_target { 2.0 } else { 1.0 }, if on_target { ACCENT } else { BORDER });
-        ui.text(support.name(), r.x + 12.0, r.y + 24.0, 20, if fits || on_target { TEXT } else { MUTED });
-        if on_target {
-            ui.text("on this spell (click: remove)", r.right() - 200.0, r.y + 24.0, 15, ACCENT);
-        } else if used {
-            ui.text("used elsewhere", r.right() - 115.0, r.y + 24.0, 15, MUTED);
-        }
-        ui.wrapped(support.description(), r.x + 12.0, r.y + 44.0, r.w - 24.0, 14, MUTED);
-        if hover && is_mouse_button_pressed(MouseButton::Left) {
-            if let Some((i, _, _)) = target {
-                if on_target {
-                    st.build.slots[i].support = None;
-                } else if fits {
-                    st.build.socket(i, support);
-                }
-            }
-        }
-        y += 76.0;
-    }
-
-    let play = Rect::new(w - 280.0, h - 80.0, 240.0, 50.0);
-    let can_play = !st.build.slots.is_empty() && st.build.is_valid();
-    ui.text("WASD / ZQSD: move    Space: dash    Tab: stats    F2: autopilot    Esc: back", 40.0, h - 48.0, 18, MUTED);
-    if ui.button(play, "Play (Enter)", can_play, true) || (can_play && is_key_pressed(KeyCode::Enter)) {
-        return BuildAction::Play;
-    }
-    BuildAction::None
 }
 
 fn fmt_time(seconds: f32) -> String {
@@ -302,21 +132,25 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
     let y = h - 100.0;
 
     // Movement slot.
-    let dash_frac = 1.0 - world.player.dash_cooldown / DASH_COOLDOWN;
+    let dash_frac = 1.0 - world.player.dash_cooldown / world.player.dash_cooldown_max;
     slot_box(ui, x, y, unit - 6.0, "Dash", "Space", dash_frac, 0.0, Color::new(0.5, 0.85, 1.0, 1.0));
     x += unit + 20.0;
     for (i, slot) in world.build.slots.iter().enumerate() {
         let sw = unit * slot.spell.size() as f32 - 6.0;
         let pulse = fx.cast_pulse.get(i).copied().unwrap_or(0.0);
         let support = slot.support.map_or("", |s| s.name());
-        slot_box(ui, x, y, sw, slot.spell.name(), support, world.slot_ready_fraction(i), pulse, element_color(slot.spell.element()));
+        slot_box(ui, x, y, sw, slot.spell.name(), support, world.slot_ready_fraction(i), pulse, family_color(slot.spell.family()));
         x += unit * slot.spell.size() as f32;
     }
 
-    // Health and momentum above the bar.
+    // Health, Barrier and momentum above the bar.
     let hx = (w - total) / 2.0;
-    bar(hx, y - 26.0, total - 6.0, 12.0, world.player.hp / world.player.max_hp, DANGER);
-    ui.text(&format!("{:.0} / {:.0}", world.player.hp.max(0.0), world.player.max_hp), hx, y - 32.0, 16, TEXT);
+    bar(hx, y - 26.0, total - 6.0, 12.0, world.player.hp / world.max_hp(), DANGER);
+    if world.player.barrier > 0.0 {
+        draw_rectangle(hx, y - 26.0, (total - 6.0) * (world.player.barrier / world.max_hp()).min(1.0), 4.0, Color::new(0.75, 0.9, 1.0, 1.0));
+    }
+    let barrier = if world.player.barrier > 0.0 { format!("   +{:.0} Barrier", world.player.barrier) } else { String::new() };
+    ui.text(&format!("{:.0} / {:.0}{}", world.player.hp.max(0.0), world.max_hp(), barrier), hx, y - 32.0, 16, TEXT);
     let pip_w = 10.0;
     let mx = hx + total - 6.0 - MOMENTUM_MAX as f32 * (pip_w + 3.0);
     for k in 0..MOMENTUM_MAX {
@@ -325,13 +159,7 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
         draw_rectangle(mx + k as f32 * (pip_w + 3.0), y - 46.0, pip_w, 12.0, c);
     }
     if world.momentum > 0 {
-        ui.text(
-            &format!("Momentum +{:.0}% cooldown rate", (world.cooldown_rate() - 1.0) * 100.0),
-            mx - 220.0,
-            y - 36.0,
-            16,
-            ACCENT,
-        );
+        ui.text(&format!("Momentum +{:.0}% cooldown rate", (world.cooldown_rate() - 1.0) * 100.0), mx, y - 54.0, 16, ACCENT);
     }
 
     if show_stats {
@@ -339,12 +167,13 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn slot_box(ui: &Ui, x: f32, y: f32, w: f32, name: &str, sub: &str, ready: f32, pulse: f32, color: Color) {
     let h = 80.0;
     draw_rectangle(x, y, w, h, PANEL);
     draw_rectangle(x, y, w, 4.0, color);
     ui.wrapped(name, x + 6.0, y + 24.0, w - 12.0, 15, TEXT);
-    ui.wrapped(sub, x + 6.0, y + 64.0, w - 12.0, 13, ACCENT);
+    ui.text(sub, x + 6.0, y + h - 10.0, 13, ACCENT);
     if ready < 1.0 {
         draw_rectangle(x, y, w, h * (1.0 - ready), Color::new(0.0, 0.0, 0.0, 0.55));
     }
@@ -401,7 +230,7 @@ pub fn result_panel(ui: &Ui, world: &World) -> ResultAction {
     }
     stats_panel(ui, world, px + 90.0, py + 214.0);
     let by = py + ph - 60.0;
-    let replay = ui.button(Rect::new(px + 40.0, by, 210.0, 40.0), "Replay, new seed (R)", true, true);
+    let replay = ui.button(Rect::new(px + 40.0, by, 210.0, 40.0), "Replay, new map (R)", true, true);
     let edit = ui.button(Rect::new(px + 270.0, by, 210.0, 40.0), "Edit build (B)", true, false);
     if replay || is_key_pressed(KeyCode::R) {
         ResultAction::Replay

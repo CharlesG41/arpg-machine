@@ -1,0 +1,372 @@
+//! The character's skill tree, generated from a seed like God Tower's ability
+//! trees: an Origin with six short exits, a cluster of spells behind each exit,
+//! an outer ring of clusters, and bridges between neighboring clusters. Every spell appears exactly once;
+//! only the layout changes from one seed to the next.
+//!
+//! Spending works like God Tower: clicking a node buys the shortest route to
+//! it from what you already own, one Skill Point per new node. Respec is free.
+use crate::content::SpellId;
+use crate::math::V2;
+use crate::rng::Rng;
+use std::collections::VecDeque;
+use std::f32::consts::TAU;
+
+/// Layout is stretched horizontally, like God Tower's, to fit wide cards.
+const STRETCH: f32 = 1.7;
+/// Minimum spacing between card centers (either axis is enough).
+const MIN_DX: f32 = 290.0;
+const MIN_DY: f32 = 130.0;
+
+#[derive(Clone, Debug)]
+pub struct TreeNode {
+    /// None for the Origin.
+    pub spell: Option<SpellId>,
+    pub pos: V2,
+    pub neighbors: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SkillTree {
+    pub seed: u64,
+    pub nodes: Vec<TreeNode>,
+    pub acquired: Vec<bool>,
+    pub points: u32,
+}
+
+pub const ORIGIN: usize = 0;
+
+impl SkillTree {
+    pub fn generate(seed: u64, points: u32) -> Self {
+        let mut rng = Rng::new(seed ^ 0x7EE5_7EE5);
+        let mut pool: Vec<SpellId> = SpellId::all().collect();
+        shuffle(&mut rng, &mut pool);
+
+        let mut positions = vec![V2::ZERO];
+        let rotation = rng.range(0.0, TAU);
+        // Six short exits keep the first choices close to the Origin.
+        for i in 0..6 {
+            let a = rotation + i as f32 * TAU / 6.0;
+            positions.push(V2::new(a.cos() * 330.0 * STRETCH, a.sin() * 330.0));
+        }
+        // The rest in clusters of about eight: six behind the exits, then an outer ring.
+        let rest = pool.len().saturating_sub(6);
+        let cluster_count = ((rest as f32 / 8.0).round() as usize).max(6);
+        let sizes: Vec<usize> = (0..cluster_count).map(|c| rest / cluster_count + usize::from(c < rest % cluster_count)).collect();
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        let mut centers: Vec<V2> = Vec::new();
+        for (c, &count) in sizes.iter().enumerate() {
+            let center = if c < 6 {
+                let a = rotation + c as f32 * TAU / 6.0 + rng.range(-0.12, 0.12);
+                let radius = rng.range(780.0, 860.0) + count as f32 * 10.0;
+                V2::new(a.cos() * radius, a.sin() * radius)
+            } else {
+                let mut attempt = 0;
+                loop {
+                    let a = rng.range(0.0, TAU);
+                    let radius = rng.range(1500.0, 2000.0) + (attempt / 100) as f32 * 120.0;
+                    let candidate = V2::new(a.cos() * radius, a.sin() * radius);
+                    if centers.iter().all(|c| c.dist(candidate) > 900.0) {
+                        break candidate;
+                    }
+                    attempt += 1;
+                }
+            };
+            centers.push(center);
+            let phase = rng.range(0.0, TAU);
+            let spread = 200.0 + count as f32 * 12.0;
+            let mut group = Vec::new();
+            for j in 0..count {
+                let mut attempt = 0;
+                loop {
+                    let angle = phase + j as f32 * TAU / count as f32 + rng.range(-0.1, 0.1);
+                    let r = if j == 0 && attempt == 0 && rng.chance(0.5) {
+                        0.0
+                    } else {
+                        rng.range(spread, spread + 60.0) + attempt as f32 * 20.0
+                    };
+                    let p = V2::new((center.x + angle.cos() * r) * STRETCH, center.y + angle.sin() * r);
+                    if positions.iter().all(|q| (q.x - p.x).abs() >= MIN_DX || (q.y - p.y).abs() >= MIN_DY) {
+                        group.push(positions.len());
+                        positions.push(p);
+                        break;
+                    }
+                    attempt += 1;
+                }
+            }
+            groups.push(group);
+        }
+
+        let mut nodes: Vec<TreeNode> = positions
+            .iter()
+            .enumerate()
+            .map(|(id, &pos)| TreeNode { spell: if id == 0 { None } else { Some(pool[id - 1]) }, pos, neighbors: Vec::new() })
+            .collect();
+        let distance = |a: usize, b: usize| {
+            let (p, q) = (positions[a], positions[b]);
+            ((p.x - q.x) / STRETCH).hypot(p.y - q.y)
+        };
+        let closest = |xs: &[usize], ys: &[usize]| {
+            xs.iter()
+                .flat_map(|&x| ys.iter().map(move |&y| (x, y)))
+                .min_by(|&(a, b), &(c, d)| distance(a, b).total_cmp(&distance(c, d)))
+                .unwrap()
+        };
+        let mut links = Vec::new();
+        for exit in 1..=6 {
+            links.push((ORIGIN, exit));
+        }
+        for (index, group) in groups.iter().enumerate() {
+            // Inner clusters hang off their exit; outer ones off the nearest earlier cluster.
+            let entry = if index < 6 {
+                let pair = closest(&[index + 1], group);
+                links.push(pair);
+                pair.1
+            } else {
+                let parent = (0..index)
+                    .min_by(|&a, &b| centers[a].dist(centers[index]).total_cmp(&centers[b].dist(centers[index])))
+                    .unwrap();
+                let pair = closest(group, &groups[parent]);
+                links.push(pair);
+                pair.0
+            };
+            let mut reached = vec![entry];
+            let mut remaining: Vec<usize> = group.iter().copied().filter(|&n| n != entry).collect();
+            let mut local = Vec::new();
+            while !remaining.is_empty() {
+                let pair = closest(&reached, &remaining);
+                local.push(pair);
+                reached.push(pair.1);
+                remaining.retain(|&n| n != pair.1);
+            }
+            let mut extra = Vec::new();
+            for (i, &a) in group.iter().enumerate() {
+                for &b in &group[i + 1..] {
+                    if distance(a, b) < 430.0 && !local.contains(&(a, b)) && !local.contains(&(b, a)) {
+                        extra.push((a, b));
+                    }
+                }
+            }
+            shuffle(&mut rng, &mut extra);
+            let loops = rng.range_usize(1, 2);
+            local.extend(extra.into_iter().take(loops));
+            links.extend(local);
+            // Short bridges between neighboring clusters, so routes can cross branches.
+            if index < 6 && rng.chance(0.67) {
+                links.push(closest(group, &groups[(index + 1) % 6]));
+            }
+            for previous in 6..index {
+                if centers[previous].dist(centers[index]) < 1500.0 && rng.chance(0.5) {
+                    links.push(closest(group, &groups[previous]));
+                }
+            }
+        }
+        for (a, b) in links {
+            if a != b && !nodes[a].neighbors.contains(&b) {
+                nodes[a].neighbors.push(b);
+                nodes[b].neighbors.push(a);
+            }
+        }
+        let mut acquired = vec![false; nodes.len()];
+        acquired[ORIGIN] = true;
+        SkillTree { seed, nodes, acquired, points }
+    }
+
+    pub fn spent(&self) -> u32 {
+        self.acquired.iter().filter(|&&a| a).count() as u32 - 1
+    }
+
+    pub fn remaining(&self) -> u32 {
+        self.points.saturating_sub(self.spent())
+    }
+
+    /// Nodes that would be bought to reach `dest`, in order (empty if owned).
+    /// None when unreachable.
+    pub fn route_to(&self, dest: usize) -> Option<Vec<usize>> {
+        if dest >= self.nodes.len() {
+            return None;
+        }
+        if self.acquired[dest] {
+            return Some(Vec::new());
+        }
+        // Every owned node is a free starting point (owned nodes stay connected).
+        let mut previous: Vec<Option<usize>> = vec![None; self.nodes.len()];
+        let mut seen = self.acquired.clone();
+        let mut queue: VecDeque<usize> = (0..self.nodes.len()).filter(|&i| self.acquired[i]).collect();
+        while let Some(node) = queue.pop_front() {
+            for &next in &self.nodes[node].neighbors {
+                if seen[next] {
+                    continue;
+                }
+                seen[next] = true;
+                previous[next] = Some(node);
+                if next == dest {
+                    let mut route = vec![next];
+                    let mut cursor = next;
+                    while let Some(parent) = previous[cursor] {
+                        if self.acquired[parent] {
+                            break;
+                        }
+                        route.push(parent);
+                        cursor = parent;
+                    }
+                    route.reverse();
+                    return Some(route);
+                }
+                queue.push_back(next);
+            }
+        }
+        None
+    }
+
+    /// Buys the route to `dest` if the points allow it.
+    pub fn acquire(&mut self, dest: usize) -> bool {
+        match self.route_to(dest) {
+            Some(route) if !route.is_empty() && route.len() as u32 <= self.remaining() => {
+                for id in route {
+                    self.acquired[id] = true;
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Refunds a node and everything that only connected through it. Free.
+    pub fn refund(&mut self, id: usize) -> u32 {
+        if id == ORIGIN || !self.acquired.get(id).copied().unwrap_or(false) {
+            return 0;
+        }
+        self.acquired[id] = false;
+        let mut connected = vec![false; self.nodes.len()];
+        connected[ORIGIN] = true;
+        let mut stack = vec![ORIGIN];
+        while let Some(node) = stack.pop() {
+            for &next in &self.nodes[node].neighbors {
+                if self.acquired[next] && !connected[next] {
+                    connected[next] = true;
+                    stack.push(next);
+                }
+            }
+        }
+        let mut refunded = 1;
+        for i in 0..self.nodes.len() {
+            if self.acquired[i] && !connected[i] {
+                self.acquired[i] = false;
+                refunded += 1;
+            }
+        }
+        refunded
+    }
+
+    pub fn reset(&mut self) {
+        self.acquired = vec![false; self.nodes.len()];
+        self.acquired[ORIGIN] = true;
+    }
+
+    /// Lowers the point budget, refunding the most recent branches if needed.
+    pub fn set_points(&mut self, points: u32) {
+        self.points = points;
+        while self.spent() > self.points {
+            // Refund the owned node farthest from the Origin (a leaf).
+            let far = (0..self.nodes.len()).filter(|&i| self.acquired[i] && i != ORIGIN).max_by(|&a, &b| {
+                self.nodes[a].pos.len_sq().total_cmp(&self.nodes[b].pos.len_sq())
+            });
+            match far {
+                Some(id) => {
+                    self.refund(id);
+                }
+                None => break,
+            }
+        }
+    }
+
+    pub fn acquired_spells(&self) -> Vec<SpellId> {
+        self.nodes.iter().zip(&self.acquired).filter(|(_, &a)| a).filter_map(|(n, _)| n.spell).collect()
+    }
+
+    pub fn node_of(&self, spell: SpellId) -> Option<usize> {
+        self.nodes.iter().position(|n| n.spell == Some(spell))
+    }
+}
+
+fn shuffle<T>(rng: &mut Rng, items: &mut [T]) {
+    for i in (1..items.len()).rev() {
+        let j = rng.range_usize(0, i);
+        items.swap(i, j);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn connected_from_origin(tree: &SkillTree) -> usize {
+        let mut seen = vec![false; tree.nodes.len()];
+        seen[ORIGIN] = true;
+        let mut stack = vec![ORIGIN];
+        while let Some(n) = stack.pop() {
+            for &m in &tree.nodes[n].neighbors {
+                if !seen[m] {
+                    seen[m] = true;
+                    stack.push(m);
+                }
+            }
+        }
+        seen.iter().filter(|&&s| s).count()
+    }
+
+    #[test]
+    fn every_spell_once_and_all_connected() {
+        for seed in 0..50 {
+            let tree = SkillTree::generate(seed, 14);
+            assert_eq!(tree.nodes.len(), SpellId::count() + 1);
+            let spells: std::collections::HashSet<_> = tree.nodes.iter().filter_map(|n| n.spell).collect();
+            assert_eq!(spells.len(), SpellId::count());
+            assert_eq!(connected_from_origin(&tree), tree.nodes.len(), "seed {seed}");
+        }
+    }
+
+    #[test]
+    fn cards_do_not_overlap() {
+        for seed in 0..50 {
+            let tree = SkillTree::generate(seed, 14);
+            for (i, a) in tree.nodes.iter().enumerate() {
+                for b in &tree.nodes[i + 1..] {
+                    assert!((a.pos.x - b.pos.x).abs() >= MIN_DX || (a.pos.y - b.pos.y).abs() >= MIN_DY);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn seeds_change_the_layout() {
+        let a = SkillTree::generate(1, 14);
+        let b = SkillTree::generate(2, 14);
+        assert!(a.nodes.iter().zip(&b.nodes).any(|(x, y)| x.spell != y.spell));
+    }
+
+    #[test]
+    fn buying_follows_the_shortest_route_and_refund_cascades() {
+        let mut tree = SkillTree::generate(3, 40);
+        // A cluster node is at least two steps from the Origin.
+        let far = (1..tree.nodes.len()).find(|&i| tree.route_to(i).unwrap().len() >= 2).unwrap();
+        let route = tree.route_to(far).unwrap();
+        assert!(tree.acquire(far));
+        assert_eq!(tree.spent(), route.len() as u32);
+        // Refunding the first step strands the rest of the route.
+        let refunded = tree.refund(route[0]);
+        assert!(refunded >= 2);
+        assert!(!tree.acquired[far]);
+    }
+
+    #[test]
+    fn points_limit_purchases() {
+        let mut tree = SkillTree::generate(4, 1);
+        let far = (1..tree.nodes.len()).find(|&i| tree.route_to(i).unwrap().len() >= 2).unwrap();
+        assert!(!tree.acquire(far));
+        assert!(tree.acquire(tree.nodes[ORIGIN].neighbors[0]));
+        assert_eq!(tree.remaining(), 0);
+        tree.set_points(0);
+        assert_eq!(tree.spent(), 0);
+    }
+}

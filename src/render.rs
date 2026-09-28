@@ -1,6 +1,6 @@
 //! Procedural look: silhouettes, code-driven motion, and all the spectacle in
 //! effects. Everything here reads the simulation; nothing writes back to it.
-use arpg_machine::content::Element;
+use arpg_machine::content::Family;
 use arpg_machine::math::V2;
 use arpg_machine::rng::Rng;
 use arpg_machine::world::{EnemyKind, Event, Phase, World, MAP_H, MAP_W, PLAYER_RADIUS};
@@ -14,24 +14,43 @@ pub const BACKGROUND: Color = Color::new(0.035, 0.04, 0.055, 1.0);
 const FLOOR: Color = Color::new(0.06, 0.068, 0.09, 1.0);
 const GRID_LINE: Color = Color::new(0.11, 0.12, 0.16, 1.0);
 
-pub fn element_color(element: Element) -> Color {
-    match element {
-        Element::Arcane => Color::new(0.74, 0.47, 1.0, 1.0),
-        Element::Frost => Color::new(0.48, 0.86, 1.0, 1.0),
-        Element::Fire => Color::new(1.0, 0.56, 0.16, 1.0),
-        Element::Poison => Color::new(0.5, 0.95, 0.32, 1.0),
-        Element::Physical => Color::new(0.86, 0.89, 0.96, 1.0),
-        Element::Lightning => Color::new(1.0, 0.95, 0.5, 1.0),
-    }
+pub fn family_color(family: Family) -> Color {
+    let (r, g, b) = match family {
+        Family::Arcane => (0.74, 0.47, 1.0),
+        Family::Fire => (1.0, 0.52, 0.15),
+        Family::Frost => (0.55, 0.9, 1.0),
+        Family::Lightning => (1.0, 0.95, 0.45),
+        Family::Poison => (0.5, 0.95, 0.32),
+        Family::Blood => (0.92, 0.18, 0.28),
+        Family::Shadow => (0.55, 0.42, 0.72),
+        Family::Light => (1.0, 0.93, 0.7),
+        Family::Nature => (0.6, 0.78, 0.3),
+        Family::Steel => (0.84, 0.87, 0.94),
+        Family::Earth => (0.75, 0.56, 0.36),
+        Family::Time => (0.35, 0.72, 1.0),
+        Family::Spirits => (0.6, 0.98, 0.86),
+        Family::Alchemy => (0.82, 0.92, 0.2),
+        Family::Astral => (0.6, 0.62, 1.0),
+    };
+    Color::new(r, g, b, 1.0)
 }
 
 fn enemy_color(kind: EnemyKind) -> Color {
     match kind {
         EnemyKind::Grunt => Color::new(0.78, 0.2, 0.3, 1.0),
         EnemyKind::Runner => Color::new(0.96, 0.43, 0.26, 1.0),
+        EnemyKind::Caster => Color::new(0.22, 0.8, 0.74, 1.0),
         EnemyKind::Brute => Color::new(0.6, 0.32, 0.9, 1.0),
         EnemyKind::Boss => Color::new(0.95, 0.38, 0.18, 1.0),
         EnemyKind::Add => Color::new(0.64, 0.36, 0.38, 1.0),
+    }
+}
+
+/// Boss attacks read as fire; a Brute slam uses the Brute's own color.
+fn telegraph_color(owner: EnemyKind) -> Color {
+    match owner {
+        EnemyKind::Brute => Color::new(0.75, 0.45, 1.0, 1.0),
+        _ => Color::new(1.0, 0.3, 0.12, 1.0),
     }
 }
 
@@ -60,7 +79,7 @@ struct Particle {
 enum Shape {
     Ring { pos: Vec2, from: f32, to: f32, color: Color, width: f32 },
     Disc { pos: Vec2, radius: f32, color: Color },
-    Cone { pos: Vec2, dir: Vec2, range: f32, half_angle: f32 },
+    Cone { pos: Vec2, dir: Vec2, range: f32, half_angle: f32, color: Color },
     Bolt { points: Vec<Vec2>, color: Color },
     Line { a: Vec2, b: Vec2, color: Color },
     Ghost { pos: Vec2 },
@@ -81,6 +100,8 @@ pub struct Fx {
     shake: f32,
     pub player_hurt: f32,
     pub boss_phase_banner: f32,
+    barrier_flash: f32,
+    heal_flash: f32,
     rng: Rng,
     time: f32,
 }
@@ -95,6 +116,8 @@ impl Fx {
             shake: 0.0,
             player_hurt: 0.0,
             boss_phase_banner: 0.0,
+            barrier_flash: 0.0,
+            heal_flash: 0.0,
             rng: Rng::new(0xF00D),
             time: 0.0,
         }
@@ -134,37 +157,38 @@ impl Fx {
         for event in &world.events {
             match event {
                 Event::Cast { slot } => self.cast_pulse[*slot] = 0.25,
-                Event::Hit { enemy, element } => {
+                Event::Hit { enemy, family } => {
                     self.flash[*enemy] = 0.09;
                     if self.rng.chance(0.25) {
                         let pos = v(world.enemies[*enemy].pos);
-                        self.burst(pos, 1, 120.0, 2.5, 0.25, element_color(*element));
+                        self.burst(pos, 1, 120.0, 2.5, 0.25, family_color(*family));
                     }
                 }
-                Event::Death { pos, kind, element, radius } => {
+                Event::Death { pos, kind, family, radius } => {
                     let pos = v(*pos);
                     let n = 8 + (*radius * 0.6) as usize;
                     self.burst(pos, n, 260.0 + radius * 4.0, 3.5, 0.55, enemy_color(*kind));
-                    self.burst(pos, n / 2 + 2, 200.0, 3.0, 0.45, element_color(*element));
+                    self.burst(pos, n / 2 + 2, 200.0, 3.0, 0.45, family_color(*family));
                     self.transient(
-                        Shape::Ring { pos, from: radius * 0.6, to: radius * 1.8, color: element_color(*element), width: 2.0 },
+                        Shape::Ring { pos, from: radius * 0.6, to: radius * 1.8, color: family_color(*family), width: 2.0 },
                         0.2,
                     );
                     if *kind == EnemyKind::Boss {
-                        self.burst(pos, 240, 700.0, 6.0, 1.4, element_color(Element::Fire));
+                        self.burst(pos, 240, 700.0, 6.0, 1.4, family_color(Family::Fire));
                         self.shake += 18.0;
                     }
                 }
-                Event::Nova { pos, radius } => {
+                Event::Nova { pos, radius, family } => {
                     let pos = v(*pos);
-                    let color = element_color(Element::Frost);
+                    let color = family_color(*family);
                     self.transient(Shape::Ring { pos, from: radius * 0.25, to: *radius, color, width: 6.0 }, 0.28);
                     self.transient(Shape::Disc { pos, radius: *radius, color: with_alpha(color, 0.12) }, 0.2);
                     self.burst(pos, 18, radius * 3.2, 3.0, 0.35, color);
                 }
-                Event::Cone { pos, dir, range, half_angle } => {
+                Event::Cone { pos, dir, range, half_angle, family } => {
                     let (pos, dir) = (v(*pos), v(*dir));
-                    self.transient(Shape::Cone { pos, dir, range: *range, half_angle: *half_angle }, 0.2);
+                    let color = family_color(*family);
+                    self.transient(Shape::Cone { pos, dir, range: *range, half_angle: *half_angle, color }, 0.2);
                     for _ in 0..10 {
                         if self.particles.len() >= MAX_PARTICLES {
                             break;
@@ -178,12 +202,13 @@ impl Fx {
                             life: 0.35,
                             max: 0.35,
                             size: 4.0,
-                            color: element_color(Element::Fire),
+                            color,
                             drag: 5.0,
                         });
                     }
                 }
-                Event::Chain { points } => {
+                Event::Chain { points, family } => {
+                    let color = family_color(*family);
                     let pts: Vec<Vec2> = points.iter().map(|p| v(*p)).collect();
                     let mut jagged = Vec::new();
                     for pair in pts.windows(2) {
@@ -198,21 +223,21 @@ impl Fx {
                     if let Some(&last) = pts.last() {
                         jagged.push(last);
                     }
-                    self.transient(Shape::Bolt { points: jagged, color: element_color(Element::Lightning) }, 0.16);
+                    self.transient(Shape::Bolt { points: jagged, color }, 0.16);
                     for p in pts.iter().skip(1) {
-                        self.burst(*p, 4, 160.0, 2.5, 0.25, element_color(Element::Lightning));
+                        self.burst(*p, 4, 160.0, 2.5, 0.25, color);
                     }
                 }
                 Event::Explosion { pos, radius } => {
                     let pos = v(*pos);
-                    let fire = element_color(Element::Fire);
+                    let fire = family_color(Family::Fire);
                     self.transient(Shape::Disc { pos, radius: *radius, color: with_alpha(fire, 0.35) }, 0.22);
                     self.transient(Shape::Ring { pos, from: radius * 0.3, to: *radius, color: fire, width: 4.0 }, 0.25);
                     self.burst(pos, 14, 380.0, 4.0, 0.5, fire);
                     self.shake = (self.shake + 1.5).min(10.0);
                 }
                 Event::Spread { from, to } => {
-                    self.transient(Shape::Line { a: v(*from), b: v(*to), color: element_color(Element::Poison) }, 0.3);
+                    self.transient(Shape::Line { a: v(*from), b: v(*to), color: family_color(Family::Poison) }, 0.3);
                 }
                 Event::PlayerHurt { amount } => {
                     self.player_hurt = 0.2;
@@ -226,9 +251,27 @@ impl Fx {
                         self.transient(Shape::Ghost { pos }, 0.18 + k as f32 * 0.04);
                     }
                 }
-                Event::Detonate { pos, radius } => {
+                Event::BarrierHit => self.barrier_flash = 0.15,
+                Event::Heal => self.heal_flash = 0.3,
+                Event::SelfCast { family } => {
+                    let pos = v(world.player.pos);
+                    let color = family_color(*family);
+                    self.transient(Shape::Ring { pos, from: 10.0, to: 60.0, color, width: 3.0 }, 0.3);
+                    self.burst(pos, 10, 160.0, 3.0, 0.4, color);
+                }
+                Event::Blast { pos, radius, family } => {
                     let pos = v(*pos);
-                    let fire = Color::new(1.0, 0.35, 0.12, 1.0);
+                    let color = family_color(*family);
+                    self.transient(Shape::Disc { pos, radius: *radius, color: with_alpha(color, 0.3) }, 0.22);
+                    self.transient(Shape::Ring { pos, from: radius * 0.4, to: *radius, color, width: 4.0 }, 0.25);
+                    self.burst(pos, 12, radius * 2.5, 3.5, 0.4, color);
+                }
+                Event::EnemyFire { pos } => {
+                    self.burst(v(*pos), 6, 140.0, 3.0, 0.3, enemy_color(EnemyKind::Caster));
+                }
+                Event::Detonate { pos, radius, owner } => {
+                    let pos = v(*pos);
+                    let fire = telegraph_color(*owner);
                     self.transient(Shape::Disc { pos, radius: *radius, color: with_alpha(fire, 0.5) }, 0.3);
                     self.burst(pos, 24, 420.0, 5.0, 0.6, fire);
                     self.shake = (self.shake + 5.0).min(14.0);
@@ -241,7 +284,7 @@ impl Fx {
                 }
                 Event::BossPhaseTwo { pos } => {
                     let pos = v(*pos);
-                    self.transient(Shape::Ring { pos, from: 40.0, to: 320.0, color: element_color(Element::Fire), width: 10.0 }, 0.7);
+                    self.transient(Shape::Ring { pos, from: 40.0, to: 320.0, color: family_color(Family::Fire), width: 10.0 }, 0.7);
                     self.boss_phase_banner = 2.5;
                     self.shake += 8.0;
                 }
@@ -251,21 +294,6 @@ impl Fx {
 
     /// Ambient effects that come from ongoing state rather than events.
     pub fn ambient(&mut self, world: &World, dt: f32) {
-        for pool in &world.pools {
-            if self.rng.chance(pool.radius * dt * 0.25) {
-                let offset = Vec2::from_angle(self.rng.range(0.0, std::f32::consts::TAU)) * self.rng.range(0.0, pool.radius);
-                let pos = v(pool.pos) + offset;
-                self.particles.push(Particle {
-                    pos,
-                    vel: vec2(0.0, -30.0),
-                    life: 0.6,
-                    max: 0.6,
-                    size: 3.0,
-                    color: element_color(Element::Poison),
-                    drag: 1.0,
-                });
-            }
-        }
         if world.momentum > 0 && self.rng.chance(world.momentum as f32 * dt * 2.0) {
             let pos = v(world.player.pos) + Vec2::from_angle(self.rng.range(0.0, std::f32::consts::TAU)) * 20.0;
             self.particles.push(Particle {
@@ -301,6 +329,8 @@ impl Fx {
         self.shake = (self.shake - dt * 40.0).max(0.0);
         self.player_hurt = (self.player_hurt - dt).max(0.0);
         self.boss_phase_banner = (self.boss_phase_banner - dt).max(0.0);
+        self.barrier_flash = (self.barrier_flash - dt).max(0.0);
+        self.heal_flash = (self.heal_flash - dt).max(0.0);
     }
 
     pub fn camera(&mut self, world: &World) -> Camera2D {
@@ -352,18 +382,18 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
     draw_rectangle_lines(0.0, 0.0, MAP_W, MAP_H, 6.0, Color::new(0.3, 0.2, 0.35, 1.0));
 
     // Ground layer.
-    for pool in &world.pools {
-        let p = v(pool.pos);
-        let fade = (pool.time_left / 0.4).min(1.0) * ((pool.duration - pool.time_left) / 0.2).min(1.0);
-        let c = element_color(Element::Poison);
-        draw_circle(p.x, p.y, pool.radius, with_alpha(c, 0.14 * fade));
-        let wobble = 1.0 + 0.03 * (t * 6.0).sin();
-        draw_circle_lines(p.x, p.y, pool.radius * wobble, 2.0, with_alpha(c, 0.55 * fade));
+    for zone in &world.zones {
+        // A pending strike: a ring that fills up until the next tick lands.
+        let p = v(zone.pos);
+        let c = family_color(zone.family);
+        let fill = 1.0 - (zone.timer / zone.interval).clamp(0.0, 1.0);
+        draw_circle(p.x, p.y, zone.radius * fill, with_alpha(c, 0.12));
+        draw_circle_lines(p.x, p.y, zone.radius, 2.0, with_alpha(c, 0.5 + 0.3 * (t * 8.0).sin().abs()));
     }
     for tele in &world.telegraphs {
         let p = v(tele.pos);
         let progress = (tele.elapsed / tele.warning).clamp(0.0, 1.0);
-        let c = Color::new(1.0, 0.3, 0.12, 1.0);
+        let c = telegraph_color(tele.owner);
         draw_circle(p.x, p.y, tele.radius * progress, with_alpha(c, 0.22));
         draw_circle_lines(p.x, p.y, tele.radius, 3.0, with_alpha(c, 0.5 + 0.4 * (t * 18.0).sin().abs()));
     }
@@ -374,10 +404,9 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
         draw_circle(p.x, p.y, 30.0, with_alpha(enemy_color(EnemyKind::Boss), 0.2 + 0.2 * pulse));
     }
 
-    // Orbit trail under the bodies.
-    if let Some(blades) = world.blade_positions() {
-        let r = blades[0].dist(world.player.pos);
-        draw_circle_lines(center.x, center.y, r, 10.0, with_alpha(element_color(Element::Physical), 0.05));
+    // Orbit trails under the bodies.
+    for orbit in &world.orbits {
+        draw_circle_lines(center.x, center.y, orbit.radius, 10.0, with_alpha(family_color(orbit.family), 0.05));
     }
 
     for (i, e) in world.enemies.iter().enumerate() {
@@ -390,19 +419,34 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
     for p in &world.projectiles {
         let pos = v(p.pos);
         let tail = pos - v(p.vel) * 0.035;
-        let c = element_color(p.element);
+        let c = family_color(p.family);
         draw_line(tail.x, tail.y, pos.x, pos.y, 9.0, with_alpha(c, 0.25));
         draw_line(tail.x, tail.y, pos.x, pos.y, 4.0, c);
         draw_circle(pos.x, pos.y, 4.0, WHITE);
     }
 
-    if let Some(blades) = world.blade_positions() {
-        let c = element_color(Element::Physical);
-        for b in blades {
+    for shot in &world.enemy_shots {
+        let pos = v(shot.pos);
+        let tail = pos - v(shot.vel) * 0.08;
+        let c = enemy_color(EnemyKind::Caster);
+        draw_line(tail.x, tail.y, pos.x, pos.y, shot.radius * 1.2, with_alpha(c, 0.25));
+        draw_circle(pos.x, pos.y, shot.radius * 1.6, with_alpha(c, 0.2));
+        draw_circle(pos.x, pos.y, shot.radius, c);
+        draw_circle(pos.x, pos.y, shot.radius * 0.45, WHITE);
+    }
+
+    for orbit in &world.orbits {
+        let c = family_color(orbit.family);
+        for b in world.blade_positions(orbit) {
             let b = v(b);
-            let angle = (b - center).to_angle() + std::f32::consts::FRAC_PI_2;
             draw_circle(b.x, b.y, 14.0, with_alpha(c, 0.12));
-            draw_rectangle_ex(b.x, b.y, 30.0, 8.0, DrawRectangleParams { offset: vec2(0.5, 0.5), rotation: angle, color: c });
+            if orbit.family == Family::Steel {
+                let angle = (b - center).to_angle() + std::f32::consts::FRAC_PI_2;
+                draw_rectangle_ex(b.x, b.y, 30.0, 8.0, DrawRectangleParams { offset: vec2(0.5, 0.5), rotation: angle, color: c });
+            } else {
+                draw_circle(b.x, b.y, 8.0, c);
+                draw_circle(b.x, b.y, 3.5, WHITE);
+            }
         }
     }
 
@@ -416,8 +460,8 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
                 draw_circle_lines(pos.x, pos.y, r, *width * k.max(0.3), with_alpha(*color, k));
             }
             Shape::Disc { pos, radius, color } => draw_circle(pos.x, pos.y, *radius, with_alpha(*color, color.a * k)),
-            Shape::Cone { pos, dir, range, half_angle } => {
-                let c = element_color(Element::Fire);
+            Shape::Cone { pos, dir, range, half_angle, color } => {
+                let c = *color;
                 let segments = 10;
                 for s in 0..segments {
                     let a0 = -half_angle + 2.0 * half_angle * s as f32 / segments as f32;
@@ -468,7 +512,17 @@ fn draw_enemy(world: &World, e: &arpg_machine::world::Enemy, flash: f32, t: f32)
             draw_triangle(a, b, c, fill);
             draw_triangle_lines(a, b, c, 1.5, outline);
         }
+        EnemyKind::Caster => {
+            let rot = e.heading.y.atan2(e.heading.x).to_degrees();
+            draw_poly(p.x, p.y, 5, r, rot, fill);
+            draw_poly_lines(p.x, p.y, 5, r, rot, 1.5, outline);
+            draw_circle(p.x, p.y, r * 0.3, with_alpha(WHITE, 0.7));
+        }
         EnemyKind::Brute => {
+            if e.windup > 0.0 {
+                let pulse = 0.5 + 0.5 * (t * 30.0).sin();
+                draw_circle(p.x, p.y, r * 1.9, with_alpha(telegraph_color(EnemyKind::Brute), 0.25 + 0.3 * pulse));
+            }
             draw_circle(p.x, p.y, r * 1.5, with_alpha(body, 0.12));
             draw_poly(p.x, p.y, 6, r, t * 20.0, fill);
             draw_poly_lines(p.x, p.y, 6, r, t * 20.0, 2.5, outline);
@@ -493,15 +547,23 @@ fn draw_enemy(world: &World, e: &arpg_machine::world::Enemy, flash: f32, t: f32)
         }
     }
     if e.poison > 0 {
-        draw_circle_lines(p.x, p.y, r + 4.0, 2.0, with_alpha(element_color(Element::Poison), 0.7));
+        draw_circle_lines(p.x, p.y, r + 4.0, 2.0, with_alpha(family_color(Family::Poison), 0.7));
     }
     if e.burn > 0 {
         let flicker = 0.6 + 0.4 * (t * 25.0 + e.id as f32).sin();
-        let fire = element_color(Element::Fire);
+        let fire = family_color(Family::Fire);
         draw_circle(p.x, p.y - r - 5.0, 3.0 + (e.burn as f32).sqrt(), with_alpha(fire, flicker));
     }
+    if e.freeze > 0.0 {
+        draw_rectangle(p.x - r * 1.1, p.y - r * 1.1, r * 2.2, r * 2.2, Color::new(0.7, 0.92, 1.0, 0.45));
+        draw_rectangle_lines(p.x - r * 1.1, p.y - r * 1.1, r * 2.2, r * 2.2, 2.0, Color::new(0.85, 0.97, 1.0, 0.9));
+    }
+    if e.bleed > 0.0 {
+        let drip = (t * 3.0 + e.id as f32 * 0.37).fract();
+        draw_circle(p.x + r * 0.4, p.y + r * (0.2 + drip), 2.5, family_color(Family::Blood));
+    }
     if e.chill > 0.0 {
-        draw_poly_lines(p.x, p.y, 6, r + 6.0, 0.0, 1.5, with_alpha(element_color(Element::Frost), 0.8));
+        draw_poly_lines(p.x, p.y, 6, r + 6.0, 0.0, 1.5, with_alpha(family_color(Family::Frost), 0.8));
     }
     if e.kind == EnemyKind::Brute && e.hp < e.max_hp {
         let w = e.radius * 2.4;
@@ -520,6 +582,25 @@ fn draw_player(world: &World, fx: &Fx, t: f32) {
         let m = world.momentum as f32 / arpg_machine::world::MOMENTUM_MAX as f32;
         let gold = Color::new(1.0, 0.78, 0.3, 1.0);
         draw_circle_lines(p.x, p.y, PLAYER_RADIUS + 10.0 + 6.0 * m, 2.0 + 3.0 * m, with_alpha(gold, 0.3 + 0.5 * m * world.momentum_left()));
+    }
+    if pl.barrier > 0.0 {
+        let flash = (fx.barrier_flash / 0.15).clamp(0.0, 1.0);
+        let c = Color::new(0.75, 0.9, 1.0, 0.35 + 0.4 * flash);
+        draw_poly_lines(p.x, p.y, 6, PLAYER_RADIUS + 7.0, t * 40.0, 1.5 + pl.barrier / 25.0, c);
+    }
+    if world.thorns_active() {
+        let c = family_color(Family::Nature);
+        for k in 0..8 {
+            let a = t * 1.5 + k as f32 * std::f32::consts::TAU / 8.0;
+            let dir = Vec2::from_angle(a);
+            let base = p + dir * (PLAYER_RADIUS + 4.0);
+            let side = dir.perp() * 3.5;
+            draw_triangle(p + dir * (PLAYER_RADIUS + 13.0), base + side, base - side, with_alpha(c, 0.8));
+        }
+    }
+    if fx.heal_flash > 0.0 {
+        let k = fx.heal_flash / 0.3;
+        draw_circle_lines(p.x, p.y, PLAYER_RADIUS + 18.0 - 8.0 * k, 3.0, Color::new(0.45, 1.0, 0.55, k));
     }
     draw_circle(p.x, p.y, PLAYER_RADIUS * 2.0, Color::new(0.5, 0.85, 1.0, 0.12 * alpha));
     draw_circle(p.x, p.y, PLAYER_RADIUS, with_alpha(base, alpha));
