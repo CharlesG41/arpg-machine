@@ -3,7 +3,7 @@
 use arpg_machine::content::{Family, Loot};
 use arpg_machine::math::V2;
 use arpg_machine::rng::Rng;
-use arpg_machine::world::{EnemyKind, Event, Phase, ShrineKind, World, PLAYER_RADIUS};
+use arpg_machine::world::{BossKind, EnemyKind, Event, Phase, ShotStyle, ShrineKind, World, PLAYER_RADIUS, WARD_RADIUS};
 use macroquad::prelude::*;
 
 const MAX_PARTICLES: usize = 6000;
@@ -43,6 +43,41 @@ fn enemy_color(kind: EnemyKind) -> Color {
         EnemyKind::Brute => Color::new(0.6, 0.32, 0.9, 1.0),
         EnemyKind::Boss => Color::new(0.95, 0.38, 0.18, 1.0),
         EnemyKind::Add => Color::new(0.64, 0.36, 0.38, 1.0),
+    }
+}
+
+/// Each boss has its own color.
+pub fn boss_color(kind: BossKind) -> Color {
+    match kind {
+        BossKind::EmberWarden => Color::new(0.95, 0.38, 0.18, 1.0),
+        BossKind::IronJuggernaut => Color::new(0.62, 0.7, 0.8, 1.0),
+        BossKind::HollowOracle => Color::new(0.7, 0.45, 1.0, 1.0),
+    }
+}
+
+fn shot_color(style: ShotStyle) -> Color {
+    match style {
+        ShotStyle::Orb => enemy_color(EnemyKind::Caster),
+        ShotStyle::Ember => Color::new(1.0, 0.45, 0.15, 1.0),
+        ShotStyle::Iron => Color::new(0.8, 0.86, 0.95, 1.0),
+        ShotStyle::Void => Color::new(0.78, 0.4, 1.0, 1.0),
+    }
+}
+
+/// A kill streak ends after this long without a kill.
+const STREAK_GAP: f32 = 1.5;
+
+/// The card's size as short bars sitting on its top edge, right-aligned: one
+/// bar per size.
+pub fn size_pips(r: Rect, size: u8, scale: f32) {
+    let (w, h, gap) = (12.0 * scale, 4.0 * scale, 3.0 * scale);
+    let total = size as f32 * w + size.saturating_sub(1) as f32 * gap;
+    let x0 = r.right() - 8.0 * scale - total;
+    let y = r.y - h / 2.0;
+    for k in 0..size {
+        let x = x0 + k as f32 * (w + gap);
+        draw_rectangle(x - 1.5, y - 1.5, w + 3.0, h + 3.0, Color::new(0.02, 0.02, 0.03, 1.0));
+        draw_rectangle(x, y, w, h, Color::new(0.95, 0.95, 0.99, 1.0));
     }
 }
 
@@ -132,6 +167,21 @@ enum Shape {
     Ghost { pos: Vec2 },
 }
 
+/// A soul freed by a kill, drawn in toward you.
+struct Wisp {
+    pos: Vec2,
+    vel: Vec2,
+    color: Color,
+    age: f32,
+}
+
+/// A damage number rising off the boss.
+struct Number {
+    pos: Vec2,
+    value: f32,
+    life: f32,
+}
+
 struct Transient {
     shape: Shape,
     life: f32,
@@ -146,12 +196,26 @@ pub struct Fx {
     pub cast_pulse: Vec<f32>,
     shake: f32,
     pub player_hurt: f32,
-    pub boss_phase_banner: f32,
+    /// Brightens you as souls reach you.
+    player_glow: f32,
+    /// A boss mechanic just started: its text and how long to show it.
+    pub boss_banner: Option<(String, f32)>,
     barrier_flash: f32,
     heal_flash: f32,
     /// Name of the shrine just claimed, and how long to show it.
     pub shrine_banner: Option<(ShrineKind, f32)>,
     pub loot_banner: Option<(Loot, f32)>,
+    wisps: Vec<Wisp>,
+    numbers: Vec<Number>,
+    /// Boss health at the last frame, and damage gathered since the last number.
+    boss_hp: Option<f32>,
+    boss_damage: (f32, f32),
+    /// Kills in a row with less than `STREAK_GAP` between them.
+    pub streak: u32,
+    streak_timer: f32,
+    pub streak_pop: f32,
+    /// Seconds of slow motion left (boss death), for the main loop.
+    pub slow_motion: f32,
     rng: Rng,
     time: f32,
 }
@@ -165,11 +229,20 @@ impl Fx {
             cast_pulse: Vec::new(),
             shake: 0.0,
             player_hurt: 0.0,
-            boss_phase_banner: 0.0,
+            player_glow: 0.0,
+            boss_banner: None,
             barrier_flash: 0.0,
             heal_flash: 0.0,
             shrine_banner: None,
             loot_banner: None,
+            wisps: Vec::new(),
+            numbers: Vec::new(),
+            boss_hp: None,
+            boss_damage: (0.0, 0.0),
+            streak: 0,
+            streak_timer: 0.0,
+            streak_pop: 0.0,
+            slow_motion: 0.0,
             rng: Rng::new(0xF00D),
             time: 0.0,
         }
@@ -225,8 +298,22 @@ impl Fx {
                         Shape::Ring { pos, from: radius * 0.6, to: radius * 1.8, color: family_color(*family), width: 2.0 },
                         0.2,
                     );
+                    let souls = if *kind == EnemyKind::Boss { 60 } else if *kind == EnemyKind::Brute { 4 } else { 1 };
+                    for _ in 0..souls {
+                        if self.wisps.len() < 260 {
+                            let dir = Vec2::from_angle(self.rng.range(0.0, std::f32::consts::TAU));
+                            let speed = self.rng.range(80.0, 220.0) * if *kind == EnemyKind::Boss { 3.0 } else { 1.0 };
+                            self.wisps.push(Wisp { pos, vel: dir * speed, color: mix(enemy_color(*kind), WHITE, 0.5), age: 0.0 });
+                        }
+                    }
+                    if *kind != EnemyKind::Boss {
+                        self.streak += 1;
+                        self.streak_timer = STREAK_GAP;
+                        self.streak_pop = 0.12;
+                    }
                     if *kind == EnemyKind::Boss {
-                        self.burst(pos, 240, 700.0, 6.0, 1.4, family_color(Family::Fire));
+                        self.slow_motion = 1.0;
+                        self.burst(pos, 240, 700.0, 6.0, 1.4, boss_color(world.boss_def.kind));
                         self.shake += 18.0;
                     }
                 }
@@ -349,15 +436,21 @@ impl Fx {
                 }
                 Event::BossSpawned { pos } => {
                     let pos = v(*pos);
-                    self.transient(Shape::Ring { pos, from: 20.0, to: 260.0, color: enemy_color(EnemyKind::Boss), width: 8.0 }, 0.6);
-                    self.burst(pos, 80, 500.0, 5.0, 0.9, enemy_color(EnemyKind::Boss));
+                    let color = boss_color(world.boss_def.kind);
+                    self.transient(Shape::Ring { pos, from: 20.0, to: 260.0, color, width: 8.0 }, 0.6);
+                    self.burst(pos, 80, 500.0, 5.0, 0.9, color);
                     self.shake += 10.0;
                 }
-                Event::BossPhaseTwo { pos } => {
+                Event::BossAlert { pos, text } => {
                     let pos = v(*pos);
-                    self.transient(Shape::Ring { pos, from: 40.0, to: 320.0, color: family_color(Family::Fire), width: 10.0 }, 0.7);
-                    self.boss_phase_banner = 2.5;
+                    let color = boss_color(world.boss_def.kind);
+                    self.transient(Shape::Ring { pos, from: 40.0, to: 320.0, color, width: 10.0 }, 0.7);
+                    self.boss_banner = Some((text.clone(), 2.5));
                     self.shake += 8.0;
+                }
+                Event::ShotHit { pos } => {
+                    self.burst(v(*pos), 10, 220.0, 3.0, 0.3, WHITE);
+                    self.shake = (self.shake + 3.0).min(14.0);
                 }
             }
         }
@@ -365,6 +458,42 @@ impl Fx {
 
     /// Ambient effects that come from ongoing state rather than events.
     pub fn ambient(&mut self, world: &World, dt: f32) {
+        // Souls fly out, then curve into you.
+        let target = v(world.player.pos);
+        for w in &mut self.wisps {
+            w.age += dt;
+            let to = target - w.pos;
+            let pull = 900.0 + 2600.0 * w.age;
+            w.vel += to.normalize_or_zero() * pull * dt;
+            w.vel *= (1.0 - 3.0 * dt).max(0.0);
+            w.pos += w.vel * dt;
+        }
+        let before = self.wisps.len();
+        self.wisps.retain(|w| w.pos.distance(target) > 16.0 && w.age < 3.0);
+        if self.wisps.len() < before {
+            self.player_glow = (self.player_glow + 0.04 * (before - self.wisps.len()) as f32).min(0.4);
+        }
+        // Damage numbers off the boss, gathered over a short window.
+        if let Some(b) = world.boss.as_ref().filter(|b| world.enemies.get(b.index).is_some_and(|e| e.kind == EnemyKind::Boss)) {
+            let e = &world.enemies[b.index];
+            let hp = e.hp.max(0.0);
+            if let Some(last) = self.boss_hp {
+                if hp < last {
+                    self.boss_damage.0 += last - hp;
+                }
+            }
+            self.boss_hp = Some(hp);
+            self.boss_damage.1 += dt;
+            if self.boss_damage.1 > 0.18 {
+                if self.boss_damage.0 >= 1.0 {
+                    let offset = vec2(self.rng.range(-40.0, 40.0), self.rng.range(-20.0, 10.0));
+                    self.numbers.push(Number { pos: v(e.pos) + offset - vec2(0.0, e.radius), value: self.boss_damage.0, life: 0.9 });
+                }
+                self.boss_damage = (0.0, 0.0);
+            }
+        } else {
+            self.boss_hp = None;
+        }
         if world.momentum > 0 && self.rng.chance(world.momentum as f32 * dt * 2.0) {
             let pos = v(world.player.pos) + Vec2::from_angle(self.rng.range(0.0, std::f32::consts::TAU)) * 20.0;
             self.particles.push(Particle {
@@ -381,6 +510,18 @@ impl Fx {
 
     pub fn update(&mut self, dt: f32) {
         self.time += dt;
+        for n in &mut self.numbers {
+            n.pos.y -= 60.0 * dt;
+            n.life -= dt;
+        }
+        self.numbers.retain(|n| n.life > 0.0);
+        self.streak_timer -= dt;
+        if self.streak_timer <= 0.0 {
+            self.streak = 0;
+        }
+        self.streak_pop = (self.streak_pop - dt).max(0.0);
+        self.slow_motion = (self.slow_motion - dt).max(0.0);
+        self.player_glow = (self.player_glow - dt).max(0.0);
         for p in &mut self.particles {
             p.pos += p.vel * dt;
             p.vel *= (1.0 - p.drag * dt).max(0.0);
@@ -399,7 +540,12 @@ impl Fx {
         }
         self.shake = (self.shake - dt * 40.0).max(0.0);
         self.player_hurt = (self.player_hurt - dt).max(0.0);
-        self.boss_phase_banner = (self.boss_phase_banner - dt).max(0.0);
+        if let Some((_, left)) = &mut self.boss_banner {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.boss_banner = None;
+            }
+        }
         self.barrier_flash = (self.barrier_flash - dt).max(0.0);
         self.heal_flash = (self.heal_flash - dt).max(0.0);
         if let Some((_, left)) = &mut self.shrine_banner {
@@ -499,18 +645,48 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
         draw_circle(p.x, p.y, zone.radius * fill, with_alpha(c, 0.12));
         draw_circle_lines(p.x, p.y, zone.radius, 2.0, with_alpha(c, 0.5 + 0.3 * (t * 8.0).sin().abs()));
     }
+    // The Oracle's circle of light: bright when you stand in it.
+    if let Some(ward) = world.boss.as_ref().and_then(|b| b.ward) {
+        let p = v(ward);
+        let inside = world.player.pos.dist(ward) <= WARD_RADIUS;
+        let gold = Color::new(1.0, 0.88, 0.5, 1.0);
+        draw_circle(p.x, p.y, WARD_RADIUS, with_alpha(gold, if inside { 0.16 } else { 0.07 + 0.05 * (t * 4.0).sin().abs() }));
+        draw_circle_lines(p.x, p.y, WARD_RADIUS, if inside { 4.0 } else { 2.5 }, with_alpha(gold, if inside { 0.9 } else { 0.55 }));
+        for k in 0..12 {
+            let a = t * 0.6 + k as f32 * std::f32::consts::TAU / 12.0;
+            let q = p + Vec2::from_angle(a) * WARD_RADIUS;
+            draw_circle(q.x, q.y, 3.0, with_alpha(gold, 0.8));
+        }
+    }
     for tele in &world.telegraphs {
         let p = v(tele.pos);
         let progress = (tele.elapsed / tele.warning).clamp(0.0, 1.0);
-        let c = telegraph_color(tele.owner);
-        draw_circle(p.x, p.y, tele.radius * progress, with_alpha(c, 0.22));
-        draw_circle_lines(p.x, p.y, tele.radius, 3.0, with_alpha(c, 0.5 + 0.4 * (t * 18.0).sin().abs()));
+        let c = if tele.owner == EnemyKind::Boss { boss_color(world.boss_def.kind) } else { telegraph_color(tele.owner) };
+        let blink = 0.5 + 0.4 * (t * 18.0).sin().abs();
+        match tele.line {
+            None => {
+                draw_circle(p.x, p.y, tele.radius * progress, with_alpha(c, 0.22));
+                draw_circle_lines(p.x, p.y, tele.radius, 3.0, with_alpha(c, blink));
+            }
+            Some((dir, length)) => {
+                let d = v(dir);
+                let end = p + d * length;
+                let side = d.perp() * tele.radius;
+                draw_line(p.x, p.y, end.x, end.y, tele.radius * 2.0, with_alpha(c, 0.1));
+                let fill = p + d * (length * progress);
+                draw_line(p.x, p.y, fill.x, fill.y, tele.radius * 2.0, with_alpha(c, 0.22));
+                for s in [side, -side] {
+                    draw_line(p.x + s.x, p.y + s.y, end.x + s.x, end.y + s.y, 3.0, with_alpha(c, blink));
+                }
+            }
+        }
     }
     if let Phase::BossIncoming { timer, pos } = world.phase {
         let p = v(pos);
         let pulse = (t * 10.0).sin().abs();
-        draw_circle_lines(p.x, p.y, 60.0 + timer * 60.0, 4.0, with_alpha(enemy_color(EnemyKind::Boss), 0.4 + 0.5 * pulse));
-        draw_circle(p.x, p.y, 30.0, with_alpha(enemy_color(EnemyKind::Boss), 0.2 + 0.2 * pulse));
+        let c = boss_color(world.boss_def.kind);
+        draw_circle_lines(p.x, p.y, 60.0 + timer * 60.0, 4.0, with_alpha(c, 0.4 + 0.5 * pulse));
+        draw_circle(p.x, p.y, 30.0, with_alpha(c, 0.2 + 0.2 * pulse));
     }
 
     // Orbit trails under the bodies.
@@ -537,7 +713,7 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
     for shot in &world.enemy_shots {
         let pos = v(shot.pos);
         let tail = pos - v(shot.vel) * 0.08;
-        let c = enemy_color(EnemyKind::Caster);
+        let c = shot_color(shot.style);
         draw_line(tail.x, tail.y, pos.x, pos.y, shot.radius * 1.2, with_alpha(c, 0.25));
         draw_circle(pos.x, pos.y, shot.radius * 1.6, with_alpha(c, 0.2));
         draw_circle(pos.x, pos.y, shot.radius, c);
@@ -595,11 +771,118 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
         let k = p.life / p.max;
         draw_circle(p.pos.x, p.pos.y, p.size * (0.4 + 0.6 * k), with_alpha(p.color, k));
     }
+    for w in &fx.wisps {
+        let tail = w.pos - w.vel * 0.03;
+        draw_line(tail.x, tail.y, w.pos.x, w.pos.y, 3.0, with_alpha(w.color, 0.35));
+        draw_circle(w.pos.x, w.pos.y, 3.2, w.color);
+        draw_circle(w.pos.x, w.pos.y, 1.4, WHITE);
+    }
+    if fx.player_glow > 0.0 {
+        let p = v(world.player.pos);
+        draw_circle(p.x, p.y, PLAYER_RADIUS + 8.0, Color::new(0.8, 0.95, 1.0, fx.player_glow * 0.5));
+    }
+}
+
+/// Damage numbers rising off the boss, drawn in screen space over the world.
+pub fn draw_numbers(ui: &crate::ui::Ui, world: &World, fx: &Fx) {
+    let (w, h) = (screen_width(), screen_height());
+    let scale = w / VIEW_WIDTH;
+    let center = vec2(w / 2.0, h / 2.0);
+    let p = v(world.player.pos);
+    for n in &fx.numbers {
+        let at = center + (n.pos - p) * scale;
+        let a = (n.life / 0.3).min(1.0);
+        let pop = 1.0 + ((n.life - 0.75) / 0.15).clamp(0.0, 1.0) * 0.5;
+        let size = ((16.0 + n.value.sqrt() * 0.9).min(34.0) * pop) as u16;
+        let text = format!("{:.0}", n.value);
+        let tw = ui.width(&text, size);
+        ui.text(&text, at.x - tw / 2.0 + 2.0, at.y + 2.0, size, Color::new(0.0, 0.0, 0.0, 0.6 * a));
+        ui.text(&text, at.x - tw / 2.0, at.y, size, Color::new(1.0, 0.95, 0.75, a));
+    }
+}
+
+/// Each boss has its own silhouette: the Warden a spiked octagon, the
+/// Juggernaut a heavy square with plates, the Oracle a floating eye.
+fn draw_boss(world: &World, p: Vec2, r: f32, t: f32, fill: Color, outline: Color) {
+    let Some(b) = world.boss.as_ref() else {
+        return;
+    };
+    let body = boss_color(b.def.kind);
+    match b.def.kind {
+        BossKind::EmberWarden => {
+            let spin = t * 0.8;
+            for k in 0..8 {
+                let a = spin + k as f32 * std::f32::consts::TAU / 8.0;
+                let dir = Vec2::from_angle(a);
+                let tip = p + dir * r * 1.45;
+                let side = dir.perp() * r * 0.25;
+                draw_triangle(tip, p + dir * r * 0.9 + side, p + dir * r * 0.9 - side, outline);
+            }
+            draw_circle(p.x, p.y, r * 1.6, with_alpha(body, 0.1));
+            draw_poly(p.x, p.y, 8, r, spin.to_degrees(), fill);
+            draw_poly_lines(p.x, p.y, 8, r, spin.to_degrees(), 3.0, outline);
+            draw_circle(p.x, p.y, r * (0.35 + 0.08 * (t * 5.0).sin()), Color::new(1.0, 0.85, 0.5, 1.0));
+            if b.burn_immunity > 0.0 {
+                let pulse = 0.5 + 0.5 * (t * 8.0).sin();
+                draw_circle_lines(p.x, p.y, r * 1.9, 5.0, Color::new(1.0, 0.6, 0.1, 0.4 + 0.5 * pulse));
+            }
+        }
+        BossKind::IronJuggernaut => {
+            let e = &world.enemies[b.index];
+            let rot = e.heading.y.atan2(e.heading.x).to_degrees() + 45.0;
+            draw_circle(p.x, p.y, r * 1.5, with_alpha(body, 0.1));
+            // Plates around the body.
+            for k in 0..4 {
+                let a = (rot + 45.0).to_radians() + k as f32 * std::f32::consts::FRAC_PI_2;
+                let q = p + Vec2::from_angle(a) * r * 1.05;
+                draw_poly(q.x, q.y, 4, r * 0.38, rot, mix(body, BLACK, 0.3));
+            }
+            draw_poly(p.x, p.y, 4, r * 1.05, rot, fill);
+            draw_poly_lines(p.x, p.y, 4, r * 1.05, rot, 3.0, outline);
+            let core = if b.charge.is_some() { Color::new(1.0, 0.4, 0.3, 1.0) } else { Color::new(0.9, 0.95, 1.0, 1.0) };
+            draw_circle(p.x, p.y, r * 0.3, core);
+            if b.shield > 0.0 {
+                let k = b.shield / b.shield_max.max(1.0);
+                let pulse = 0.5 + 0.5 * (t * 6.0).sin();
+                draw_circle(p.x, p.y, r * 1.7, Color::new(0.5, 0.8, 1.0, 0.12 + 0.1 * k));
+                draw_poly_lines(p.x, p.y, 6, r * 1.75, t * 40.0, 3.0 + 3.0 * k, Color::new(0.6, 0.85, 1.0, 0.5 + 0.4 * pulse));
+            }
+            if b.stagger > 0.0 {
+                // Stars circling the head.
+                for k in 0..3 {
+                    let a = t * 5.0 + k as f32 * 2.1;
+                    let q = p + vec2(a.cos() * r * 0.8, -r * 1.3 + a.sin() * r * 0.25);
+                    draw_poly(q.x, q.y, 5, 6.0, t * 200.0, Color::new(1.0, 0.95, 0.5, 1.0));
+                }
+            }
+        }
+        BossKind::HollowOracle => {
+            let hover = (t * 2.0).sin() * 5.0;
+            let p = p + vec2(0.0, hover);
+            let warded = b.warded_against(world.player.pos);
+            draw_circle(p.x, p.y, r * 1.7, with_alpha(body, if warded { 0.18 } else { 0.08 }));
+            for k in 0..6 {
+                let a = t * 1.2 + k as f32 * std::f32::consts::TAU / 6.0;
+                let q = p + Vec2::from_angle(a) * r * 1.35;
+                draw_circle(q.x, q.y, 6.0, with_alpha(body, 0.9));
+            }
+            draw_poly(p.x, p.y, 3, r, -90.0 + (t * 0.5).sin() * 8.0, fill);
+            draw_poly(p.x, p.y, 3, r, 90.0 + (t * 0.5).sin() * 8.0, with_alpha(fill, 0.8));
+            draw_poly_lines(p.x, p.y, 6, r * 0.9, t * 15.0, 2.0, outline);
+            // The eye looks at you.
+            let look = (v(world.player.pos) - p).normalize_or_zero() * r * 0.15;
+            draw_circle(p.x, p.y, r * 0.38, Color::new(0.95, 0.9, 1.0, 1.0));
+            draw_circle(p.x + look.x, p.y + look.y, r * 0.17, Color::new(0.2, 0.05, 0.3, 1.0));
+            if warded {
+                draw_circle_lines(p.x, p.y, r * 1.25, 4.0, Color::new(1.0, 0.88, 0.5, 0.5 + 0.3 * (t * 6.0).sin().abs()));
+            }
+        }
+    }
 }
 
 fn draw_enemy(world: &World, e: &arpg_machine::world::Enemy, flash: f32, t: f32) {
     let p = v(e.pos);
-    let mut body = enemy_color(e.kind);
+    let mut body = if e.kind == EnemyKind::Boss { boss_color(world.boss_def.kind) } else { enemy_color(e.kind) };
     if !e.awake {
         body = mix(body, FLOOR, 0.45);
     }
@@ -636,24 +919,7 @@ fn draw_enemy(world: &World, e: &arpg_machine::world::Enemy, flash: f32, t: f32)
             draw_poly(p.x, p.y, 6, r, t * 20.0, fill);
             draw_poly_lines(p.x, p.y, 6, r, t * 20.0, 2.5, outline);
         }
-        EnemyKind::Boss => {
-            let spin = t * 0.8;
-            for k in 0..8 {
-                let a = spin + k as f32 * std::f32::consts::TAU / 8.0;
-                let dir = Vec2::from_angle(a);
-                let tip = p + dir * r * 1.45;
-                let side = dir.perp() * r * 0.25;
-                draw_triangle(tip, p + dir * r * 0.9 + side, p + dir * r * 0.9 - side, outline);
-            }
-            draw_circle(p.x, p.y, r * 1.6, with_alpha(body, 0.1));
-            draw_poly(p.x, p.y, 8, r, spin.to_degrees(), fill);
-            draw_poly_lines(p.x, p.y, 8, r, spin.to_degrees(), 3.0, outline);
-            draw_circle(p.x, p.y, r * (0.35 + 0.08 * (t * 5.0).sin()), Color::new(1.0, 0.85, 0.5, 1.0));
-            if world.boss.as_ref().is_some_and(|b| b.burn_immunity > 0.0) {
-                let pulse = 0.5 + 0.5 * (t * 8.0).sin();
-                draw_circle_lines(p.x, p.y, r * 1.9, 5.0, Color::new(1.0, 0.6, 0.1, 0.4 + 0.5 * pulse));
-            }
-        }
+        EnemyKind::Boss => draw_boss(world, p, r, t, fill, outline),
     }
     if e.poison > 0 {
         draw_circle_lines(p.x, p.y, r + 4.0, 2.0, with_alpha(family_color(Family::Poison), 0.7));

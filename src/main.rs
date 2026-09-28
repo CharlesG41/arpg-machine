@@ -7,6 +7,8 @@
 //! - `ARPG_AUTOPILOT=1`: let the autopilot move.
 //! - `ARPG_SHOT=<path.png>` and `ARPG_SHOT_AT=<seconds>`: save a screenshot
 //!   after that much time on the current screen, then quit.
+mod background;
+mod audio;
 mod planner;
 mod render;
 mod ui;
@@ -67,15 +69,18 @@ async fn main() {
     let ui = Ui { font };
     let env = |k: &str| std::env::var(k).ok();
     // Debug runs (screenshots, presets) never touch your saved character.
-    let debug_run = ["ARPG_SHOT", "ARPG_PRESET", "ARPG_PLAN", "ARPG_TREE_DEMO", "ARPG_AUTOPILOT", "ARPG_COLLECTION"].iter().any(|k| env(k).is_some());
+    let debug_run = ["ARPG_SHOT", "ARPG_PRESET", "ARPG_PLAN", "ARPG_TREE_DEMO", "ARPG_AUTOPILOT", "ARPG_COLLECTION", "ARPG_BOSS"].iter().any(|k| env(k).is_some());
     let mut planner = match (debug_run, arpg_machine::save::CharacterSave::load()) {
         (false, Some(save)) => Planner::from_save(&save),
         _ => Planner::new(1),
     };
     if debug_run {
         planner.detach_from_disk();
+        background::stay_in_background();
     }
     let mut saved_text = planner.save_text();
+    // Screenshot and benchmark runs stay silent.
+    let mut audio = audio::Audio::load(debug_run && env("ARPG_SOUND").is_none()).await;
     let mut map_seed = 1u64;
     let mut screen = Screen::Plan;
     let mut world: Option<World> = None;
@@ -93,6 +98,13 @@ async fn main() {
     let shot_at: f32 = env("ARPG_SHOT_AT").and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let mut screen_time = 0.0f32;
 
+    // Debug: which boss the next map ends with (a name, or its start).
+    if let Some(name) = env("ARPG_BOSS") {
+        let name = name.to_lowercase();
+        if let Some(i) = arpg_machine::world::BOSSES.iter().position(|b| b.name.to_lowercase().contains(&name)) {
+            planner.next_boss = i;
+        }
+    }
     let find_preset = |name: &str| presets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|p| p.1);
     if let Some(build) = env("ARPG_PRESET").and_then(|n| find_preset(&n)) {
         planner.load_preset(build);
@@ -120,6 +132,12 @@ async fn main() {
 
     loop {
         let frame = get_frame_time().min(0.1);
+        if debug_run {
+            background::keep_focus_away();
+        }
+        if is_key_pressed(KeyCode::M) {
+            audio.muted = !audio.muted;
+        }
         screen_time += frame;
         clear_background(render::BACKGROUND);
         match screen {
@@ -140,7 +158,9 @@ async fn main() {
                     if is_key_pressed(KeyCode::Escape) {
                         // Leaving early keeps the experience (light death penalty, design §9).
                         if !xp_banked {
-                            planner.gain_xp(w.xp);
+                            if planner.gain_xp(w.xp) > 0 {
+                                audio.play(audio::Sfx::LevelUp);
+                            }
                             fusions = planner.receive_loot(&w.loot());
                             xp_banked = true;
                         }
@@ -157,7 +177,8 @@ async fn main() {
                     let mut input = read_input();
                     // A tap can land between simulation steps; keep it until one runs.
                     dash_queued |= input.dash;
-                    accumulator += frame;
+                    // A boss kill plays out in slow motion.
+                    accumulator += frame * if fx.slow_motion > 0.0 { 0.3 } else { 1.0 };
                     while accumulator >= DT {
                         accumulator -= DT;
                         if use_autopilot {
@@ -167,6 +188,7 @@ async fn main() {
                         dash_queued = false;
                         w.step(&input);
                         fx.consume(w);
+                        audio.consume(w);
                         w.events.clear();
                     }
                     if matches!(w.phase, Phase::Victory | Phase::Defeat) {
@@ -174,7 +196,9 @@ async fn main() {
                         if result_delay > 1.2 {
                             screen = Screen::Result;
                             if !xp_banked {
-                                planner.gain_xp(w.xp);
+                                if planner.gain_xp(w.xp) > 0 {
+                                    audio.play(audio::Sfx::LevelUp);
+                                }
                                 fusions = planner.receive_loot(&w.loot());
                                 if w.phase == Phase::Victory {
                                     planner.record_victory(w.tier);
@@ -192,7 +216,7 @@ async fn main() {
                 let pending = if xp_banked { 0 } else { w.xp };
                 ui::hud(&ui, w, &fx, show_stats, use_autopilot, planner.character, pending);
                 if matches!(screen, Screen::Result) {
-                    match ui::result_panel(&ui, w, &fusions) {
+                    match ui::result_panel(&ui, w, &fusions, &planner.next_boss_def()) {
                         ResultAction::Replay => {
                             map_seed = map_seed.wrapping_add(1);
                             *w = planner.new_world(map_seed);

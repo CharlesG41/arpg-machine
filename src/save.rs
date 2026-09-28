@@ -5,6 +5,7 @@
 use crate::character::Character;
 use crate::content::{ArtifactKind, Build, Slot, SpellId, SupportKind};
 use crate::tree::SkillTree;
+use crate::world::BOSSES;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -16,10 +17,12 @@ pub struct CharacterSave {
     pub artifacts: Vec<ArtifactKind>,
     pub sandbox: bool,
     pub tier: u32,
+    /// Index in `BOSSES` of the boss the next map ends with.
+    pub next_boss: usize,
 }
 
 impl CharacterSave {
-    pub fn capture(character: Character, tree: &SkillTree, build: &Build, sandbox: bool, tier: u32) -> Self {
+    pub fn capture(character: Character, tree: &SkillTree, build: &Build, sandbox: bool, tier: u32, next_boss: usize) -> Self {
         CharacterSave {
             character,
             tree_seed: tree.seed,
@@ -28,6 +31,7 @@ impl CharacterSave {
             artifacts: build.artifacts.clone(),
             sandbox,
             tier,
+            next_boss,
         }
     }
 
@@ -44,6 +48,7 @@ impl CharacterSave {
             out += &format!("artifact={}\n", artifact.name());
         }
         out += &format!("sandbox={}\ntier={}\n", u8::from(self.sandbox), self.tier);
+        out += &format!("boss={}\n", BOSSES[self.next_boss % BOSSES.len()].name);
         out
     }
 
@@ -56,6 +61,7 @@ impl CharacterSave {
             artifacts: Vec::new(),
             sandbox: false,
             tier: 1,
+            next_boss: 0,
         };
         let mut seen_seed = false;
         for line in text.lines() {
@@ -82,6 +88,7 @@ impl CharacterSave {
                 }
                 "sandbox" => save.sandbox = value.trim() == "1",
                 "tier" => save.tier = value.trim().parse().unwrap_or(1),
+                "boss" => save.next_boss = BOSSES.iter().position(|b| b.name == value.trim()).unwrap_or(0),
                 _ => {}
             }
         }
@@ -120,7 +127,7 @@ mod tests {
         let build = presets()[1].1.clone();
         let mut character = Character::default();
         character.add_xp(900);
-        let save = CharacterSave::capture(character, &tree, &build, true, 3);
+        let save = CharacterSave::capture(character, &tree, &build, true, 3, 2);
         let parsed = CharacterSave::parse(&save.to_text()).unwrap();
         assert_eq!(parsed, save);
     }
@@ -132,7 +139,7 @@ mod tests {
         // Only this test reads HOME in this crate's tests.
         std::env::set_var("HOME", &dir);
         let tree = SkillTree::generate(6, 7);
-        let save = CharacterSave::capture(Character { level: 4, xp: 17 }, &tree, &Build::empty(), false, 2);
+        let save = CharacterSave::capture(Character { level: 4, xp: 17 }, &tree, &Build::empty(), false, 2, 1);
         CharacterSave::save_text(&save.to_text());
         assert_eq!(CharacterSave::load(), Some(save));
         let _ = std::fs::remove_dir_all(dir);

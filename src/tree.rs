@@ -23,8 +23,15 @@ pub const ORIGIN_SIZE: f32 = 90.0;
 const GAP_X: f32 = 40.0;
 const MIN_DY: f32 = CARD_H + 30.0;
 
+/// Room a card takes when the tree is laid out. Kept as it was when saves
+/// were made, so a seed always gives the same tree.
 pub fn card_width(size: u8) -> f32 {
     size as f32 * CARD_UNIT - CARD_GAP
+}
+
+/// Width a card is drawn at: narrower than its room for big sizes.
+pub fn display_width(size: u8) -> f32 {
+    CARD_UNIT * crate::content::size_scale(size) - CARD_GAP
 }
 
 /// Whether two cards (centers and widths) leave enough room between them.

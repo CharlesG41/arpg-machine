@@ -7,7 +7,7 @@
 use arpg_machine::character::Character;
 use arpg_machine::content::{Build, Slot};
 use arpg_machine::tree::{SkillTree, ORIGIN};
-use arpg_machine::world::{autopilot, Phase, World};
+use arpg_machine::world::{autopilot, Phase, World, BOSSES};
 
 /// Spend points on the cheapest visible damaging nodes, then anything.
 fn spend(tree: &mut SkillTree) {
@@ -42,16 +42,34 @@ fn main() {
         let names: Vec<&str> = build.slots.iter().map(|s: &Slot| s.spell.name()).collect();
         let exits = tree.nodes[ORIGIN].neighbors.len();
         println!("seed {seed}: {} spells from {exits} exits: {}", names.len(), names.join(", "));
-        for map in 1..=2 {
-            let mut world = World::new(build.clone(), seed * 100 + map, 1);
+        // Bosses come in order; a loss means the same boss again.
+        let mut next_boss = 0;
+        for map in 1..=4 {
+            // Points from new levels go to more spells.
+            tree.set_points(character.skill_points());
+            spend(&mut tree);
+            for spell in tree.acquired_spells() {
+                let end = build.slots.len();
+                if !build.contains(spell) && build.used() + spell.size() <= build.capacity {
+                    build.place_spell(spell, end);
+                }
+            }
+            let boss = BOSSES[next_boss % BOSSES.len()];
+            let mut world = World::new(build.clone(), seed * 100 + map, 1).with_boss(boss.kind);
             while world.time < 900.0 && !matches!(world.phase, Phase::Victory | Phase::Defeat) {
                 let input = autopilot(&world);
                 world.step(&input);
                 world.events.clear();
             }
             let levels = character.add_xp(world.xp);
+            if world.phase == Phase::Victory {
+                next_boss += 1;
+            }
+            let hp = world.player.hp.max(0.0);
             println!(
-                "   map {map}: {:?} at {:.0}s (clear {:.0}s, boss {:.0}s), {} kills, {} XP -> level {} (+{levels})",
+                "   map {map} vs {} ({} spells): {:?} at {:.0}s, {hp:.0} hp left (clear {:.0}s, boss {:.0}s), {} kills, {} XP -> level {} (+{levels})",
+                boss.name,
+                build.slots.len(),
                 world.phase,
                 world.time,
                 world.clear_time.unwrap_or(f32::NAN),

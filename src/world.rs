@@ -10,6 +10,9 @@ use crate::rng::Rng;
 use std::collections::{HashSet, VecDeque};
 use std::f32::consts::TAU;
 
+mod boss;
+pub use boss::*;
+
 pub const DT: f32 = 1.0 / 60.0;
 pub const PLAYER_RADIUS: f32 = 14.0;
 const PLAYER_SPEED: f32 = 230.0;
@@ -129,21 +132,6 @@ pub struct Shrine {
     pub kind: ShrineKind,
     chunk: (i32, i32),
 }
-
-/// Each boss has its own stats.
-#[derive(Clone, Copy, Debug)]
-pub struct BossDef {
-    pub name: &'static str,
-    pub hp: f32,
-    pub armor: f32,
-    pub mr: f32,
-    pub speed: f32,
-    pub contact_dps: f32,
-}
-
-/// The first boss: a fight of 30 to 60 s for a fresh character at tier 1.
-pub const EMBER_WARDEN: BossDef =
-    BossDef { name: "Ember Warden", hp: 1000.0, armor: 20.0, mr: 25.0, speed: 62.0, contact_dps: 40.0 };
 
 impl EnemyKind {
     fn hp(self) -> f32 {
@@ -381,6 +369,10 @@ pub struct EnemyShot {
     pub radius: f32,
     damage: f32,
     life: f32,
+    /// Turning rate of the velocity, radians per second (curving bullets).
+    pub spin: f32,
+    pub magic: bool,
+    pub style: ShotStyle,
 }
 
 /// Repeated strikes on a spot (Zone delivery).
@@ -415,18 +407,22 @@ pub struct Telegraph {
     pub owner: EnemyKind,
     damage: f32,
     magic: bool,
+    /// A line instead of a circle: direction and length from `pos`, `radius`
+    /// wide on each side.
+    pub line: Option<(V2, f32)>,
 }
 
-#[derive(Clone, Debug)]
-pub struct BossState {
-    pub index: usize,
-    pub def: BossDef,
-    circle_timer: f32,
-    /// Seconds of Burn immunity left (phase 2).
-    pub burn_immunity: f32,
-    phase_two: bool,
-    add_waves_left: u8,
-    add_timer: f32,
+impl Telegraph {
+    /// Distance from `p` to the marked area's center line (or center).
+    pub fn distance(&self, p: V2) -> f32 {
+        match self.line {
+            None => p.dist(self.pos),
+            Some((dir, length)) => {
+                let t = (p - self.pos).dot(dir).clamp(0.0, length);
+                p.dist(self.pos + dir * t)
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -471,7 +467,10 @@ pub enum Event {
     EnemyFire { pos: V2 },
     Detonate { pos: V2, radius: f32, owner: EnemyKind },
     BossSpawned { pos: V2 },
-    BossPhaseTwo { pos: V2 },
+    /// A boss mechanic starts: the text is shown as a banner.
+    BossAlert { pos: V2, text: String },
+    /// An enemy bullet hit you.
+    ShotHit { pos: V2 },
     ShrineClaimed { pos: V2, kind: ShrineKind },
     LootDropped { pos: V2, loot: Loot },
     LootPicked { loot: Loot },
@@ -507,6 +506,8 @@ struct SlotState {
     catalyze: (u16, f32),
     /// Reserve totals at this spell's last cast.
     snapshot: [f32; ReserveKind::COUNT],
+    /// Seconds left sealed by the Hollow Oracle: no cooldown, no cast.
+    sealed: f32,
 }
 
 /// A timed effect on you, keyed by the slot and effect that cast it so a
@@ -629,6 +630,8 @@ pub struct World {
     pub momentum: u8,
     momentum_timer: f32,
     pub boss: Option<BossState>,
+    /// The boss this map ends with.
+    pub boss_def: BossDef,
     pub stats: Vec<SpellStats>,
     pub kills: u32,
     /// Experience earned this map.
@@ -667,6 +670,7 @@ impl World {
                 empower: (0.0, 0.0),
                 catalyze: (0, 0.0),
                 snapshot: [0.0; ReserveKind::COUNT],
+                sealed: 0.0,
             })
             .collect::<Vec<_>>();
         let mods = Mods::from(&build);
@@ -734,6 +738,7 @@ impl World {
             momentum: 0,
             momentum_timer: 0.0,
             boss: None,
+            boss_def: EMBER_WARDEN,
             stats,
             kills: 0,
             xp: 0,
@@ -761,6 +766,16 @@ impl World {
     pub fn with_owned_supports(mut self, owned: Vec<SupportKind>) -> Self {
         self.owned_supports = owned;
         self
+    }
+
+    pub fn with_boss(mut self, boss: BossKind) -> Self {
+        self.boss_def = boss.def();
+        self
+    }
+
+    /// Seconds a slot stays sealed by the Hollow Oracle.
+    pub fn sealed(&self, slot: usize) -> f32 {
+        self.slots.get(slot).map_or(0.0, |s| s.sealed)
     }
 
     pub fn with_maxed_artifacts(mut self, maxed: Vec<ArtifactKind>) -> Self {
@@ -1403,7 +1418,8 @@ impl World {
             }
             let to_player = player - e.pos;
             let dist = to_player.len();
-            let speed = e.kind.speed() * if e.chill > 0.0 { 0.5 } else { 1.0 };
+            let base = if e.kind == EnemyKind::Boss { self.boss_def.speed } else { e.kind.speed() };
+            let speed = base * if e.chill > 0.0 { 0.5 } else { 1.0 };
             // Casters hold at range; everything stands still while winding up.
             let stop_at = if e.kind == EnemyKind::Caster { CASTER_RANGE } else { PLAYER_RADIUS + e.radius };
             let mut step = if e.windup <= 0.0 && dist > stop_at {
@@ -1467,7 +1483,8 @@ impl World {
                 if e.freeze > 0.0 {
                     0.0
                 } else {
-                    e.kind.contact_dps() * if e.weaken > 0.0 { 0.8 } else { 1.0 }
+                    let dps = if e.kind == EnemyKind::Boss { self.boss_def.contact_dps } else { e.kind.contact_dps() };
+                    dps * if e.weaken > 0.0 { 0.8 } else { 1.0 }
                 }
             })
             .sum();
@@ -1500,6 +1517,9 @@ impl World {
                         radius: 10.0,
                         damage: 18.0 * damage_mult * weak,
                         life: 3.0,
+                        spin: 0.0,
+                        magic: true,
+                        style: ShotStyle::Orb,
                     });
                     self.events.push(Event::EnemyFire { pos });
                 }
@@ -1515,6 +1535,7 @@ impl World {
                         owner: EnemyKind::Brute,
                         damage: 35.0 * damage_mult * weak,
                         magic: false,
+                        line: None,
                     });
                 }
                 _ => {}
@@ -1526,19 +1547,34 @@ impl World {
         let player = self.player.pos;
         let mut hurt = 0.0;
         let invulnerable = self.player.invulnerable > 0.0;
+        let mut hurt_physical = 0.0;
         for shot in &mut self.enemy_shots {
+            if shot.spin != 0.0 {
+                shot.vel = shot.vel.rotate(shot.spin * DT);
+            }
             shot.pos += shot.vel * DT;
             shot.life -= DT;
             if shot.pos.dist(player) < shot.radius + PLAYER_RADIUS {
                 if !invulnerable {
-                    hurt += shot.damage;
+                    if shot.magic {
+                        hurt += shot.damage;
+                    } else {
+                        hurt_physical += shot.damage;
+                    }
                 }
+                shot.life = 0.0;
+                self.events.push(Event::ShotHit { pos: shot.pos });
+            }
+            if shot.pos.dist_sq(player) > 1400.0 * 1400.0 {
                 shot.life = 0.0;
             }
         }
         self.enemy_shots.retain(|s| s.life > 0.0);
         if hurt > 0.0 {
             self.hurt_player(hurt, true);
+        }
+        if hurt_physical > 0.0 {
+            self.hurt_player(hurt_physical, false);
         }
     }
 
@@ -1558,6 +1594,10 @@ impl World {
             s.empower.1 = (s.empower.1 - DT).max(0.0);
             s.catalyze.1 = (s.catalyze.1 - DT).max(0.0);
             if !spell.casts() {
+                continue;
+            }
+            if s.sealed > 0.0 {
+                s.sealed = (s.sealed - DT).max(0.0);
                 continue;
             }
             let haste = if s.haste_time > 0.0 { 1.0 + s.haste } else { 1.0 };
@@ -2215,10 +2255,14 @@ impl World {
 
     /// Final damage (after resistances). Returns the Health actually removed.
     fn damage(&mut self, index: usize, amount: f32, source: u8, family: Family) -> f32 {
-        let e = &mut self.enemies[index];
-        if !e.alive || amount <= 0.0 {
+        if !self.enemies[index].alive || amount <= 0.0 {
             return 0.0;
         }
+        let amount = if self.enemies[index].kind == EnemyKind::Boss { self.boss_filter(index, amount) } else { amount };
+        if amount <= 0.0 {
+            return 0.0;
+        }
+        let e = &mut self.enemies[index];
         let dealt = amount.min(e.hp);
         e.hp -= amount;
         e.awake = true;
@@ -2478,16 +2522,7 @@ impl World {
             }
             Phase::BossIncoming { timer, pos } => {
                 if timer - DT <= 0.0 {
-                    let index = self.spawn(EnemyKind::Boss, pos, true);
-                    self.boss = Some(BossState {
-                        index,
-                        def: EMBER_WARDEN,
-                        circle_timer: 2.0,
-                        burn_immunity: 0.0,
-                        phase_two: false,
-                        add_waves_left: 0,
-                        add_timer: 0.0,
-                    });
+                    self.spawn_boss(pos);
                     self.boss_start = Some(self.time);
                     self.phase = Phase::Boss;
                     self.events.push(Event::BossSpawned { pos });
@@ -2499,67 +2534,13 @@ impl World {
         }
     }
 
-    /// Ember Warden: ember circles to dodge; at half health it becomes immune to
-    /// Burn for 15 s and calls three waves of adds.
-    fn update_boss(&mut self) {
-        let Some(mut boss) = self.boss.take() else {
-            return;
-        };
-        let e = &self.enemies[boss.index];
-        if e.alive {
-            let boss_pos = e.pos;
-            let low = e.hp < e.max_hp * 0.5;
-            boss.circle_timer -= DT;
-            if boss.circle_timer <= 0.0 {
-                boss.circle_timer = 3.5;
-                let damage = 55.0 * self.damage_mult();
-                let target = self.player.pos;
-                let circle = |pos| Telegraph {
-                    pos,
-                    radius: 90.0,
-                    warning: 1.3,
-                    elapsed: 0.0,
-                    owner: EnemyKind::Boss,
-                    damage,
-                    magic: true,
-                };
-                self.telegraphs.push(circle(target));
-                for _ in 0..2 {
-                    let offset = V2::from_angle(self.rng.range(0.0, TAU)) * self.rng.range(120.0, 220.0);
-                    self.telegraphs.push(circle(target + offset));
-                }
-            }
-            if low && !boss.phase_two {
-                boss.phase_two = true;
-                boss.burn_immunity = 15.0;
-                boss.add_waves_left = 3;
-                boss.add_timer = 0.0;
-                self.enemies[boss.index].burn = 0;
-                self.events.push(Event::BossPhaseTwo { pos: boss_pos });
-            }
-            boss.burn_immunity = (boss.burn_immunity - DT).max(0.0);
-            if boss.add_waves_left > 0 {
-                boss.add_timer -= DT;
-                if boss.add_timer <= 0.0 {
-                    boss.add_timer = 4.0;
-                    boss.add_waves_left -= 1;
-                    for k in 0..10 {
-                        let pos = boss_pos + V2::from_angle(k as f32 * TAU / 10.0) * 140.0;
-                        self.spawn(EnemyKind::Add, pos, true);
-                    }
-                }
-            }
-        }
-        self.boss = Some(boss);
-    }
-
     fn update_telegraphs(&mut self) {
         let player = self.player.pos;
         let mut hurt = Vec::new();
         for t in &mut self.telegraphs {
             t.elapsed += DT;
             if t.elapsed >= t.warning {
-                if player.dist(t.pos) < t.radius + PLAYER_RADIUS && self.player.invulnerable <= 0.0 {
+                if t.distance(player) < t.radius + PLAYER_RADIUS && self.player.invulnerable <= 0.0 {
                     hurt.push((t.damage, t.magic));
                 }
                 self.events.push(Event::Detonate { pos: t.pos, radius: t.radius, owner: t.owner });
@@ -2593,28 +2574,84 @@ fn area_mult(support: Supports) -> f32 {
 }
 
 
-/// A simple autopilot: dodge telegraphs and orbs, keep some distance from what
-/// is close, otherwise walk to the nearest enemy. Used for benchmarks and demos.
+/// A simple autopilot: decide where to go (the boss, loot, shrines, the
+/// nearest enemy), then take the safest direction close to it given the
+/// bullets and telegraphs about to land. Used for benchmarks and demos.
 pub fn autopilot(world: &World) -> Input {
+    let want = intent(world);
+    dodge(world, want)
+}
+
+/// How much trouble moving along `dir` runs into over the next 0.4 s:
+/// predicted bullet contacts and telegraphs going off, sooner weighing more.
+fn danger(world: &World, dir: V2, shots: &[&EnemyShot]) -> (f32, bool) {
+    let p0 = world.player.pos;
+    let mut risk = 0.0;
+    let mut imminent = false;
+    for k in 1..=6 {
+        let t = k as f32 * 0.07;
+        let pos = p0 + dir * (world.player.speed * t);
+        for s in shots {
+            let r = s.radius + PLAYER_RADIUS + 5.0;
+            if (s.pos + s.vel * t).dist_sq(pos) < r * r {
+                risk += 1.0 / k as f32;
+                imminent |= k <= 2;
+            }
+        }
+        for tel in &world.telegraphs {
+            let left = tel.warning - tel.elapsed;
+            if tel.distance(pos) < tel.radius + PLAYER_RADIUS + 8.0 {
+                // Standing in any marked area is bad; being there when it fires is worse.
+                risk += if left < t + 0.05 { 3.0 / k as f32 } else { 0.15 };
+                imminent |= left < 0.15;
+            }
+        }
+    }
+    (risk, imminent)
+}
+
+fn dodge(world: &World, want: Input) -> Input {
     let p = world.player.pos;
-    for t in &world.telegraphs {
-        let d = p - t.pos;
-        if d.len() < t.radius + PLAYER_RADIUS + 10.0 {
-            let away = if d.len_sq() < 1.0 { V2::new(1.0, 0.0) } else { d.norm() };
-            return Input { move_dir: away, dash: t.warning - t.elapsed < 0.3 };
+    let shots: Vec<&EnemyShot> = world.enemy_shots.iter().filter(|s| s.pos.dist_sq(p) < 360.0 * 360.0).collect();
+    if shots.is_empty() && world.telegraphs.is_empty() {
+        return want;
+    }
+    let wanted = want.move_dir.norm();
+    let (risk, _) = danger(world, wanted, &shots);
+    if risk == 0.0 {
+        return want;
+    }
+    let mut best = (f32::MAX, wanted, false);
+    let options = (0..16).map(|k| V2::from_angle(k as f32 * TAU / 16.0)).chain([V2::ZERO, wanted]);
+    for dir in options {
+        let (risk, imminent) = danger(world, dir, &shots);
+        // Among equally safe moves, keep closest to where we wanted to go.
+        let score = risk - 0.05 * dir.dot(wanted);
+        if score < best.0 {
+            best = (score, dir, imminent);
         }
     }
-    for s in &world.enemy_shots {
-        let to_player = p - s.pos;
-        if to_player.len() < 110.0 && to_player.dot(s.vel) > 0.0 {
-            // Step sideways out of the orb's path.
-            let side = V2::new(-s.vel.y, s.vel.x).norm();
-            let dir = if side.dot(to_player) >= 0.0 { side } else { -side };
-            return Input { move_dir: dir, dash: false };
-        }
-    }
+    let dash = best.2 && best.0 > 0.5 && world.player.dash_cooldown <= 0.0 && best.1 != V2::ZERO;
+    Input { move_dir: best.1, dash }
+}
+
+/// Where the autopilot wants to go, ignoring danger.
+fn intent(world: &World) -> Input {
+    let p = world.player.pos;
     // During the boss fight, stand where every damaging spell reaches the boss.
     if let Some(boss) = world.boss.as_ref().filter(|b| world.enemies.get(b.index).is_some_and(|e| e.alive)) {
+        // The Oracle only takes damage from inside its light: stay in it.
+        if let Some(ward) = boss.ward {
+            let d = p - ward;
+            let dir = if d.len() > WARD_RADIUS * 0.55 {
+                (-d).norm()
+            } else if d.len_sq() < 1.0 {
+                V2::new(1.0, 0.0)
+            } else {
+                d.norm().rotate(1.57) * 0.5
+            };
+            return Input { move_dir: dir, dash: false };
+        }
         let to_boss = world.enemies[boss.index].pos - p;
         let d = to_boss.len();
         let far = (world.preferred_range() * 0.8).clamp(110.0, 420.0);
@@ -2983,6 +3020,90 @@ mod tests {
         let pierce: Vec<bool> = world.slots.iter().map(|s| s.support.has(SupportKind::Pierce)).collect();
         assert_eq!(pierce, vec![true, true, false], "only projectile spells get Pierce");
         assert_eq!(world.mods.extra_jumps, 3);
+    }
+
+    /// A world whose boss is already up, next to you.
+    fn boss_fight(kind: BossKind) -> World {
+        let mut world = World::new(preset("Starter"), 1, 1).with_boss(kind);
+        world.enemies.clear();
+        world.rebuild_grid();
+        world.spawn_boss(V2::new(200.0, 0.0));
+        world.phase = Phase::Boss;
+        world
+    }
+
+    #[test]
+    fn every_boss_falls_to_the_presets() {
+        for boss in BOSSES {
+            for name in ["Plague", "Steel"] {
+                let mut world = World::new(preset(name), 2, 1).with_boss(boss.kind);
+                while world.time < 600.0 && !matches!(world.phase, Phase::Victory | Phase::Defeat) {
+                    let input = autopilot(&world);
+                    world.step(&input);
+                    world.events.clear();
+                }
+                assert_eq!(world.phase, Phase::Victory, "{name} vs {}", boss.name);
+                assert_eq!(world.boss.as_ref().unwrap().def.name, boss.name);
+            }
+        }
+    }
+
+    #[test]
+    fn the_oracle_takes_damage_only_from_inside_its_light() {
+        let mut world = boss_fight(BossKind::HollowOracle);
+        let index = world.boss.as_ref().unwrap().index;
+        let ward = world.boss.as_ref().unwrap().ward.unwrap();
+        world.player.pos = ward + V2::new(WARD_RADIUS + 50.0, 0.0);
+        assert_eq!(world.damage(index, 100.0, 0, Family::Arcane), 0.0);
+        world.player.pos = ward;
+        assert!(world.damage(index, 100.0, 0, Family::Arcane) > 0.0);
+    }
+
+    #[test]
+    fn the_bulwark_soaks_damage_then_staggers() {
+        let mut world = boss_fight(BossKind::IronJuggernaut);
+        let index = world.boss.as_ref().unwrap().index;
+        let max = world.enemies[index].max_hp;
+        world.enemies[index].hp = max * 0.6;
+        world.update_boss();
+        let shield = world.boss.as_ref().unwrap().shield;
+        assert!(shield > 0.0, "a shield rises under 66%");
+        let before = world.enemies[index].hp;
+        world.damage(index, shield * 0.5, 0, Family::Arcane);
+        assert_eq!(world.enemies[index].hp, before, "the shield takes it all");
+        world.damage(index, shield, 0, Family::Arcane);
+        let b = world.boss.as_ref().unwrap();
+        assert_eq!(b.shield, 0.0);
+        assert!(b.stagger > 0.0 && world.enemies[index].hp < before);
+    }
+
+    #[test]
+    fn a_sealed_spell_does_not_cast() {
+        let mut world = boss_fight(BossKind::HollowOracle);
+        world.slots[0].sealed = 5.0;
+        world.slots[0].cooldown = 0.0;
+        world.player.pos = world.boss.as_ref().unwrap().ward.unwrap();
+        for _ in 0..60 {
+            world.update_spells();
+        }
+        assert_eq!(world.slots[0].casts, 0);
+        assert!(world.sealed(0) > 3.9);
+    }
+
+    #[test]
+    fn line_telegraphs_measure_from_the_line() {
+        let t = Telegraph {
+            pos: V2::ZERO,
+            radius: 50.0,
+            warning: 1.0,
+            elapsed: 0.0,
+            owner: EnemyKind::Boss,
+            damage: 1.0,
+            magic: false,
+            line: Some((V2::new(1.0, 0.0), 600.0)),
+        };
+        assert_eq!(t.distance(V2::new(300.0, 40.0)), 40.0);
+        assert_eq!(t.distance(V2::new(700.0, 0.0)), 100.0);
     }
 
     #[test]

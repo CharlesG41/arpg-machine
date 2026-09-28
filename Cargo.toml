@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-macroquad = "0.4"
+macroquad = { version = "0.4", features = ["audio"] }
 
 # The simulation runs hundreds of enemies per frame; keep dev builds playable.
 [profile.dev]

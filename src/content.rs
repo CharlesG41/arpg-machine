@@ -902,6 +902,13 @@ pub enum ArtifactKind {
     ChainLink,
 }
 
+/// How much wider a card is than a size-1 card: ×1, ×1.25, ×1.5. Bigger
+/// cards read as bigger without a size 3 taking three times the room; the
+/// size itself shows as bars on top of the card.
+pub fn size_scale(size: u8) -> f32 {
+    1.0 + 0.25 * size.saturating_sub(1) as f32
+}
+
 /// Artifacts go from tier 1 to 5; two copies of a tier fuse into the next.
 /// Tier 5 is legendary.
 pub const MAX_ARTIFACT_TIER: u8 = 5;

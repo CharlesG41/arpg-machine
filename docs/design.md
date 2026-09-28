@@ -497,8 +497,13 @@ l'esprit des Boss Contracts de God Tower) :
 
 **Reco : chaque boss combine au moins une mécanique de positionnement et une
 mécanique de build.** Avec le respec gratuit, un boss qui bat ton build te
-pousse à revoir ta machine avant de réessayer. (Ouvert : annoncer le boss
-avant d'entrer, pour qu'on puisse s'y préparer dès le premier essai?)
+pousse à revoir ta machine avant de réessayer. **Décidé : le prochain boss est
+annoncé avant d'entrer** (en-tête du planner), pour qu'on puisse s'y préparer
+dès le premier essai.
+
+**Décidé : les boss sont des bullet hells** (spirales, anneaux avec brèche,
+éventails visés, balles qui courbent), en plus de leur mécanique de build. Les
+3 boss du départ sont décrits dans prototype.md.
 
 Décidé :
 - **Durée d'un combat de boss : 30 à 60 secondes**, dans une map de 3 à 5

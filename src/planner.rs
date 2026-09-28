@@ -1,13 +1,13 @@
 //! Planning screens: the skill tree, and the loadout where spells, supports and
 //! artifacts are dragged into place.
-use crate::render::{family_color, side_arrows, tier_color};
+use crate::render::{boss_color, family_color, side_arrows, size_pips, tier_color};
 use crate::ui::{Tooltip, Ui, ACCENT, BORDER, CARD, CARD_HOVER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
 use arpg_machine::account::{tier_scaling, Account};
 use arpg_machine::character::Character;
-use arpg_machine::content::{presets, tier_label, ArtifactKind, Build, Family, Loot, SpellId, SupportKind, MAX_ARTIFACT_TIER};
+use arpg_machine::content::{presets, size_scale, tier_label, ArtifactKind, Build, Family, Loot, SpellId, SupportKind, MAX_ARTIFACT_TIER};
 use arpg_machine::math::V2;
-use arpg_machine::world::World;
-use arpg_machine::tree::{card_width, SkillTree, CARD_H, ORIGIN, ORIGIN_SIZE};
+use arpg_machine::world::{BossDef, World, BOSSES};
+use arpg_machine::tree::{display_width, SkillTree, CARD_H, ORIGIN, ORIGIN_SIZE};
 use macroquad::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -84,20 +84,22 @@ const ART_H: f32 = 96.0;
 /// next to big ones. Returns rects in item order.
 #[allow(clippy::too_many_arguments)]
 fn pack<G: PartialEq + Copy>(items: &[(G, u8)], x0: f32, y0: f32, unit: f32, gap: f32, cols: u8, row_h: f32, card_h: f32) -> Vec<Rect> {
-    let mut rows: Vec<(G, u8)> = Vec::new();
+    let mut rows: Vec<(G, f32)> = Vec::new();
     items
         .iter()
         .map(|&(group, size)| {
-            let row = match rows.iter().position(|&(g, used)| g == group && used + size <= cols) {
+            let width = size_scale(size);
+            let fits = |used: f32| used + width <= cols as f32 + 1e-3;
+            let row = match rows.iter().position(|&(g, used)| g == group && fits(used)) {
                 Some(row) => row,
                 None => {
-                    rows.push((group, 0));
+                    rows.push((group, 0.0));
                     rows.len() - 1
                 }
             };
             let used = rows[row].1;
-            rows[row].1 += size;
-            Rect::new(x0 + used as f32 * unit, y0 + row as f32 * row_h, size as f32 * unit - gap, card_h)
+            rows[row].1 += width;
+            Rect::new(x0 + used * unit, y0 + row as f32 * row_h, width * unit - gap, card_h)
         })
         .collect()
 }
@@ -126,6 +128,9 @@ pub struct Planner {
     list_scroll: f32,
     /// Show only this family in the spell collection.
     family_filter: Option<Family>,
+    /// Index in `BOSSES` of the boss the next map ends with. Beating it
+    /// brings the next one; losing means the same boss again.
+    pub next_boss: usize,
 }
 
 impl Planner {
@@ -152,6 +157,7 @@ impl Planner {
             notice: None,
             list_scroll: 0.0,
             family_filter: None,
+            next_boss: 0,
         }
     }
 
@@ -276,9 +282,41 @@ impl Planner {
         self.tab = Tab::Loadout;
     }
 
+    pub fn next_boss_def(&self) -> BossDef {
+        BOSSES[self.next_boss % BOSSES.len()]
+    }
+
+    /// The next boss, top of the screen; hover for its mechanics.
+    fn boss_preview(&self, ui: &Ui) {
+        let def = self.next_boss_def();
+        let r = Rect::new(575.0, 12.0, 390.0, 54.0);
+        let color = boss_color(def.kind);
+        let hover = r.contains(crate::ui::mouse());
+        draw_rectangle(r.x, r.y, r.w, r.h, if hover { PANEL_HOVER } else { PANEL });
+        draw_rectangle(r.x, r.y, 5.0, r.h, color);
+        draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, if hover { color } else { BORDER });
+        ui.text("NEXT BOSS", r.x + 14.0, r.y + 18.0, 12, MUTED);
+        ui.text(def.name, r.x + 14.0, r.y + 43.0, 22, color);
+        let hp = def.hp * tier_scaling(self.tier).health;
+        let stats = format!("{hp:.0} HP · PR {:.0} · MR {:.0}", def.armor, def.mr);
+        ui.text(&stats, r.right() - ui.width(&stats, 14) - 12.0, r.y + 18.0, 14, TEXT);
+        ui.text("hover: mechanics", r.right() - ui.width("hover: mechanics", 12) - 12.0, r.y + 42.0, 12, MUTED);
+        if hover {
+            let mechanics: Vec<String> = def.mechanics.iter().map(|m| format!("- {m}")).collect();
+            ui.tooltip(&Tooltip {
+                title: def.name.to_string(),
+                color,
+                subtitle: format!("{stats} · map tier {}", self.tier),
+                body: format!("{}\n\n{}", def.summary, mechanics.join("\n")),
+                footer: Some(("Beat it to face the next boss. Lose, and it waits for you.".to_string(), MUTED)),
+            });
+        }
+    }
+
     /// A map with this character's build, tier and collection.
     pub fn new_world(&self, seed: u64) -> World {
         World::new(self.build.clone(), seed, self.tier)
+            .with_boss(self.next_boss_def().kind)
             .with_owned_supports(self.account.supports.clone())
             .with_maxed_artifacts(self.account.maxed_artifacts())
     }
@@ -300,6 +338,7 @@ impl Planner {
         planner.build.slots = save.slots.clone();
         planner.build.artifacts = save.artifacts.clone();
         planner.tier = save.tier;
+        planner.next_boss = save.next_boss % BOSSES.len();
         planner.sync_character();
         planner.tab = if planner.build.slots.is_empty() { Tab::Tree } else { Tab::Loadout };
         planner
@@ -307,12 +346,13 @@ impl Planner {
 
     /// Text of the current character's save; the caller writes it when it changes.
     pub fn save_text(&self) -> String {
-        arpg_machine::save::CharacterSave::capture(self.character, &self.tree, &self.build, self.sandbox, self.tier).to_text()
+        arpg_machine::save::CharacterSave::capture(self.character, &self.tree, &self.build, self.sandbox, self.tier, self.next_boss).to_text()
     }
 
     /// A fresh level-1 character with a new tree.
     pub fn new_character(&mut self) {
         self.character = Character::default();
+        self.next_boss = 0;
         let seed = self.tree.seed.wrapping_add(1);
         self.tree = SkillTree::generate(seed, self.character.skill_points());
         self.fitted = false;
@@ -351,6 +391,7 @@ impl Planner {
 
     /// A boss kill: may unlock the next tier (saved on the account).
     pub fn record_victory(&mut self, tier: u32) {
+        self.next_boss = (self.next_boss + 1) % BOSSES.len();
         if let Some(unlocked) = self.account.record_victory(tier) {
             self.save_account();
             self.say(&format!("Map tier {unlocked} unlocked!"));
@@ -426,9 +467,11 @@ impl Planner {
                 self.notice = None;
             }
         }
-        if ui.button(Rect::new(w - 300.0, 16.0, 276.0, 44.0), label, can_play, can_play)
-            || (can_play && is_key_pressed(KeyCode::Enter))
-        {
+        let play = ui.button(Rect::new(w - 300.0, 16.0, 276.0, 44.0), label, can_play, can_play)
+            || (can_play && is_key_pressed(KeyCode::Enter));
+        // Last, so its tooltip covers the rest.
+        self.boss_preview(ui);
+        if play {
             return PlanAction::Play;
         }
         PlanAction::None
@@ -448,7 +491,7 @@ impl Planner {
         let node = &self.tree.nodes[id];
         let c = self.to_screen(node.pos);
         let (w, h) = match node.spell {
-            Some(s) => (card_width(s.size()), CARD_H),
+            Some(s) => (display_width(s.size()), CARD_H),
             None => (ORIGIN_SIZE, ORIGIN_SIZE),
         };
         Rect::new(c.x - w * self.zoom / 2.0, c.y - h * self.zoom / 2.0, w * self.zoom, h * self.zoom)
@@ -596,7 +639,8 @@ impl Planner {
                 (BORDER, 1.0)
             };
             draw_rectangle_lines(r.x, r.y, r.w, r.h, thick, border);
-            // The card's width is its size; long names wrap onto a second line.
+            size_pips(r, spell.size(), z * 1.6);
+            // Long names wrap onto a second line.
             let name_color = if is_owned { TEXT } else { Color::new(0.78, 0.8, 0.86, 1.0) };
             let inner = r.w / z - 28.0;
             let lines = ui.wrap_lines(spell.name(), inner, 22);
@@ -1007,6 +1051,7 @@ impl Planner {
             draw_rectangle(r.x, r.y, r.w, r.h, if hover { PANEL_HOVER } else { PANEL });
             draw_rectangle(r.x, r.y, 5.0, r.h, family_color(spell.family()));
             side_arrows(r, spell.affects_sides(), 0.75);
+            size_pips(r, spell.size(), 0.8);
             let color = if on_bar { MUTED } else { TEXT };
             ui.text(spell.name(), r.x + 12.0, r.y + 20.0, 16, color);
             let sub = if on_bar { "on the bar".to_string() } else { format!("{} · {}", spell.family().name(), spell.delivery().name()) };
@@ -1028,6 +1073,7 @@ impl Planner {
             draw_rectangle(r.x, r.y, r.w, r.h, if lifted { Color::new(0.05, 0.05, 0.07, 1.0) } else { PANEL });
             draw_rectangle(r.x, r.y, r.w, 5.0, family_color(slot.spell.family()));
             side_arrows(Rect::new(r.x, r.y - 20.0, r.w, r.h), slot.spell.affects_sides(), 0.75);
+            size_pips(*r, slot.spell.size(), 0.8);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, BORDER);
             let name_color = if lifted { MUTED } else { TEXT };
             ui.wrapped(slot.spell.name(), r.x + 6.0, r.y + 24.0, r.w - 10.0, 15, name_color);
@@ -1074,6 +1120,7 @@ impl Planner {
             let lifted = dragging == Some((Item::Artifact(a), Source::ArtifactBar));
             draw_rectangle(r.x, r.y, r.w, r.h, if lifted { Color::new(0.05, 0.05, 0.07, 1.0) } else { Color::new(0.12, 0.1, 0.07, 1.0) });
             draw_rectangle(r.x, r.y, r.w, 4.0, tier_color(tier));
+            size_pips(*r, a.size(), 0.8);
             let legendary = self.build.is_legendary(a);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, if legendary { 2.0 } else { 1.0 }, if legendary { tier_color(tier) } else { Color::new(0.5, 0.4, 0.2, 1.0) });
             ui.wrapped(a.name(), r.x + 8.0, r.y + 22.0, r.w - 16.0, 15, if lifted { MUTED } else { TEXT });
@@ -1170,6 +1217,7 @@ impl Planner {
             };
             draw_rectangle(r.x, r.y, r.w, r.h, fill);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.35, 0.3, 0.2, 1.0));
+            size_pips(r, a.size(), 0.8);
             let dim = Color::new(0.35, 0.33, 0.3, 1.0);
             ui.text(a.name(), r.x + 8.0, r.y + 20.0, 14, if !owned { dim } else if equipped { MUTED } else { TEXT });
             if owned {

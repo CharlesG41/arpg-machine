@@ -27,6 +27,7 @@ En map :
 - Espace (ou Maj) : dash
 - Tab : tableau des dégâts par sort
 - F2 : autopilote (le jeu joue tout seul)
+- M : couper ou remettre le son
 - Échap : retour à la planification
 
 Outils sans fenêtre :
@@ -84,9 +85,13 @@ cargo run --release --example catalogue
   n'écrivent la sauvegarde ni le compte.
 - **Découverte de l'arbre** : on ne voit que ses nœuds et ceux juste à côté ;
   les nœuds encore cachés juste au-delà apparaissent comme des cartes « ? ».
-- **Cartes proportionnelles** : un sort ou un artefact de taille 2 est deux fois
-  plus large qu'un de taille 1, partout (arbre, listes, barres). Les listes
-  placent chaque carte dans la première rangée de sa famille où elle entre. Au moins 4
+- **Taille des cartes** : une carte de taille 2 est 1,25 fois plus large
+  qu'une de taille 1, et une de taille 3 1,5 fois (arbre, listes, barre en
+  map). La taille se lit aussi aux **barres blanches sur le bord du haut** :
+  une par point de taille. La barre de sorts et la barre d'artefacts du
+  Loadout restent proportionnelles, parce qu'elles montrent la capacité
+  utilisée. Les listes placent chaque carte dans la première rangée de sa
+  famille où elle entre. Au moins 4
   des 6 sorties de l'Origin font des dégâts.
 - **Skill tree** généré à partir d'une seed, sur le modèle de God Tower : une
   Origin, 6 sorties, une grappe de 5 sorts derrière chaque sortie, et des ponts
@@ -127,9 +132,26 @@ cargo run --release --example catalogue
     (magiques) qu'on peut esquiver ;
   - hexagone (Brute, rare), 30 / 0 : quand tu es proche, il prépare un slam au
     sol télégraphié (0,9 s) ;
-  - octogone (boss). Chaque boss a ses propres stats : l'Ember Warden a
-    1000 PV, 20 PR, 25 MR (30 à 60 s pour un personnage niveau 1 au tier 1). Cercles de feu télégraphiés ; à 50 % de PV,
-    immunisé au Burn 15 s et 3 vagues d'adds.
+  - les boss (voir plus bas).
+- **3 boss, en bullet hell**, chacun avec une mécanique de positionnement et
+  une mécanique qui teste le build. La map est imposée : le prochain boss est
+  affiché dans l'en-tête (survol : ses mécaniques et ses stats au tier choisi)
+  et sur l'écran de résultat. Le battre amène le suivant (Warden → Juggernaut
+  → Oracle → Warden…) ; perdre, c'est le même boss. Sauvegardé avec le
+  personnage. Cible : 30 à 60 s pour un personnage de niveau 1–3 au tier 1.
+  - **Ember Warden** (octogone à pointes, 1000 PV, 20 PR / 25 MR) : spirales
+    de braises, cercles de feu télégraphiés ; à 50 % : immunisé au Burn 15 s,
+    3 vagues d'adds, anneaux de feu avec une brèche.
+  - **Iron Juggernaut** (carré blindé, 900 PV, 45 PR / 15 MR) : charge le long
+    d'une ligne marquée, puis éclate en shrapnel et reste **sonné** 1,8 s
+    (+30 % de dégâts reçus) ; éventails de carreaux visés. À 66 % et 33 % :
+    **Bulwark**, un bouclier de 15 % des PV max et des engrenages qui tournent.
+    Le casser en 8 s le sonne 3 s ; sinon il se répare de 15 %. Teste le burst.
+  - **Hollow Oracle** (œil flottant, 620 PV, 15 PR / 45 MR) : ne prend des
+    dégâts que si tu te tiens dans son **cercle de lumière**, qui se déplace
+    toutes les 8 s (6 s sous 50 %) ; anneaux d'orbes décalés d'une volée à
+    l'autre ; fleurs de balles qui courbent. Toutes les 10 s, il **scelle** ton
+    sort qui a fait le plus de dégâts pendant 5 s. Teste la redondance.
 - **Anti-overkill**, **momentum** (cap 20, décroissance 2 s), **Barrier**.
 - **Tiers de map** (comme les difficultés de Diablo) : on commence au tier 1.
   Battre le boss d'un tier débloque le suivant, au niveau du compte (sauvegardé
@@ -174,4 +196,19 @@ cargo run --release --example catalogue
 ## Pas dans le prototype
 
 Portail de l'arbre, sorts légendaires, supports sur le dash, modificateurs de
-map, plusieurs boss.
+map.
+
+## Gamefeel
+
+- **Son** synthétisé au lancement (aucun fichier) : casts, pops de kill, gros
+  kill, coup reçu, dash, loot, sanctuaire, apparition et alertes du boss,
+  explosions, mort du boss, level up, défaite. Chaque son a un écart minimum
+  pour que 100 kills dans une frame restent un seul pop. M coupe le son ; les
+  runs de debug sont muets (sauf `ARPG_SOUND=1`).
+- **Âmes** : chaque kill libère une âme qui s'envole puis est aspirée vers toi.
+- **Série de kills** sous la barre du haut (à partir de 10), qui grossit à
+  chaque kill et chauffe vers l'orange.
+- **Chiffres de dégâts** qui montent du boss (regroupés toutes les 0,18 s).
+- **Bords rouges** quand tu es touché, et un battement quand tu es sous 30 %
+  de PV ; secousse et étincelles quand une balle te touche.
+- **Ralenti** d'une seconde à la mort du boss.

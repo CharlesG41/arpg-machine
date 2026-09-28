@@ -1,8 +1,8 @@
 //! Shared interface helpers, the in-map HUD and the result panel.
-use crate::render::{family_color, loot_color, shrine_color, side_arrows, tier_color, VIEW_WIDTH};
-use arpg_machine::content::{ArtifactKind, MAX_ARTIFACT_TIER};
+use crate::render::{boss_color, family_color, loot_color, shrine_color, side_arrows, size_pips, tier_color, VIEW_WIDTH};
+use arpg_machine::content::{size_scale, ArtifactKind, MAX_ARTIFACT_TIER};
 use arpg_machine::character::Character;
-use arpg_machine::world::{Phase, ShrineKind, World, MOMENTUM_MAX, PROGRESS_NEEDED};
+use arpg_machine::world::{BossDef, Phase, ShrineKind, World, MOMENTUM_MAX, PROGRESS_NEEDED};
 use macroquad::prelude::*;
 
 pub const PANEL: Color = Color::new(0.08, 0.09, 0.12, 0.94);
@@ -165,6 +165,35 @@ fn bar(x: f32, y: f32, w: f32, h: f32, frac: f32, fill: Color) {
 pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, autopilot: bool, character: Character, pending_xp: u32) {
     let (w, h) = (screen_width(), screen_height());
 
+    // Red edges when you get hit, and a slow pulse when Health is low.
+    let hurt = (fx.player_hurt / 0.2).clamp(0.0, 1.0);
+    let low = world.player.hp / world.max_hp() < 0.3 && world.phase != Phase::Defeat;
+    let beat = if low { 0.35 + 0.25 * (get_time() as f32 * 6.0).sin().abs() } else { 0.0 };
+    let edge = (hurt * 0.55).max(beat);
+    if edge > 0.0 {
+        let depth = 120.0;
+        for k in 0..12 {
+            let d = depth * k as f32 / 12.0;
+            let a = edge * (1.0 - k as f32 / 12.0).powi(2) * 0.35;
+            let c = Color::new(0.85, 0.05, 0.05, a);
+            let step = depth / 12.0;
+            draw_rectangle(0.0, d, w, step, c);
+            draw_rectangle(0.0, h - d - step, w, step, c);
+            draw_rectangle(d, 0.0, step, h, c);
+            draw_rectangle(w - d - step, 0.0, step, h, c);
+        }
+    }
+    crate::render::draw_numbers(ui, world, fx);
+
+    // Kill streak, under the top bar.
+    if fx.streak >= 10 && fx.boss_banner.is_none() {
+        let pop = fx.streak_pop / 0.12;
+        let size = (26.0 + 10.0 * pop + (fx.streak as f32).sqrt() * 0.6).min(46.0) as u16;
+        let hot = (fx.streak as f32 / 200.0).min(1.0);
+        let c = Color::new(1.0, 0.85 - 0.4 * hot, 0.35 - 0.2 * hot, 1.0);
+        ui.centered(&format!("{} streak", fx.streak), w / 2.0, 112.0, size, c);
+    }
+
     // Progress or boss health, top center.
     let bw = 620.0f32.min(w - 80.0);
     let bx = (w - bw) / 2.0;
@@ -175,18 +204,29 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
         }
         Phase::BossIncoming { .. } => {
             bar(bx, 24.0, bw, 18.0, 1.0, ACCENT);
-            ui.centered("The Ember Warden is coming…", w / 2.0, 64.0, 22, DANGER);
+            ui.centered(&format!("The {} is coming…", world.boss_def.name), w / 2.0, 64.0, 22, DANGER);
         }
         _ => {
             if let Some(b) = &world.boss {
                 let e = &world.enemies[b.index];
-                bar(bx, 24.0, bw, 18.0, e.hp / e.max_hp, DANGER);
-                let label = if b.burn_immunity > 0.0 {
-                    format!("Ember Warden — immune to Burn ({:.0} s)", b.burn_immunity)
+                let color = boss_color(b.def.kind);
+                bar(bx, 24.0, bw, 18.0, e.hp / e.max_hp, color);
+                if b.shield > 0.0 {
+                    let k = b.shield / b.shield_max.max(1.0);
+                    draw_rectangle(bx, 24.0, bw * k, 6.0, Color::new(0.6, 0.85, 1.0, 1.0));
+                }
+                let (label, warn) = if b.burn_immunity > 0.0 {
+                    (format!("{} — immune to Burn ({:.0} s)", b.def.name, b.burn_immunity), true)
+                } else if b.shield > 0.0 {
+                    (format!("{} — Bulwark: break it! ({:.0} s)", b.def.name, b.shield_timer.max(0.0)), true)
+                } else if b.stagger > 0.0 {
+                    (format!("{} — staggered: +30% damage", b.def.name), false)
+                } else if b.warded_against(world.player.pos) {
+                    (format!("{} — warded: stand in the light", b.def.name), true)
                 } else {
-                    "Ember Warden".to_string()
+                    (b.def.name.to_string(), false)
                 };
-                ui.centered(&label, w / 2.0, 64.0, 18, TEXT);
+                ui.centered(&label, w / 2.0, 64.0, 18, if warn { Color::new(1.0, 0.75, 0.35, 1.0) } else { TEXT });
             }
         }
     }
@@ -204,9 +244,10 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
         ui.centered(&format!("Found: {}", loot.name()), w / 2.0, 230.0, 28, Color::new(c.r, c.g, c.b, a));
         ui.centered(loot.kind_name(), w / 2.0, 256.0, 18, Color::new(TEXT.r, TEXT.g, TEXT.b, a));
     }
-    if fx.boss_phase_banner > 0.0 {
-        let a = (fx.boss_phase_banner / 0.5).min(1.0);
-        ui.centered("Immune to Burn! Adds incoming!", w / 2.0, 120.0, 30, Color::new(1.0, 0.6, 0.2, a));
+    if let Some((text, left)) = &fx.boss_banner {
+        let a = (left / 0.5).min(1.0);
+        let c = boss_color(world.boss_def.kind);
+        ui.centered(text, w / 2.0, 120.0, 30, Color::new(c.r, c.g, c.b, a));
     }
 
     // Numbers, top left.
@@ -245,7 +286,7 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
 
     // Spell bar, bottom center.
     let unit = 86.0;
-    let n_units: f32 = world.build.slots.iter().map(|s| s.spell.size() as f32).sum::<f32>() + 1.0;
+    let n_units: f32 = world.build.slots.iter().map(|s| size_scale(s.spell.size())).sum::<f32>() + 1.0;
     let total = n_units * unit + 20.0;
     let mut x = (w - total) / 2.0;
     let y = h - 100.0;
@@ -255,7 +296,7 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
     slot_box(ui, x, y, unit - 6.0, "Dash", "Space", dash_frac, 0.0, Color::new(0.5, 0.85, 1.0, 1.0), (false, false));
     x += unit + 20.0;
     for (i, slot) in world.build.slots.iter().enumerate() {
-        let sw = unit * slot.spell.size() as f32 - 6.0;
+        let sw = unit * size_scale(slot.spell.size()) - 6.0;
         let pulse = fx.cast_pulse.get(i).copied().unwrap_or(0.0);
         let support = slot.support.map_or("", |s| s.name());
         slot_box(
@@ -270,7 +311,15 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
             family_color(slot.spell.family()),
             slot.spell.affects_sides(),
         );
-        x += unit * slot.spell.size() as f32;
+        let sealed = world.sealed(i);
+        if sealed > 0.0 {
+            // Sealed by the Oracle: a violet lock over the card.
+            draw_rectangle(x, y, sw, 80.0, Color::new(0.3, 0.1, 0.45, 0.75));
+            draw_rectangle_lines(x, y, sw, 80.0, 3.0, Color::new(0.78, 0.4, 1.0, 1.0));
+            ui.centered(&format!("SEALED {:.0}", sealed.ceil()), x + sw / 2.0, y + 46.0, 16, Color::new(0.95, 0.85, 1.0, 1.0));
+        }
+        size_pips(Rect::new(x, y, sw, 80.0), slot.spell.size(), 0.8);
+        x += unit * size_scale(slot.spell.size());
     }
 
     // Health, Barrier and momentum above the bar.
@@ -395,7 +444,7 @@ pub enum ResultAction {
     Edit,
 }
 
-pub fn result_panel(ui: &Ui, world: &World, fusions: &[(ArtifactKind, u8)]) -> ResultAction {
+pub fn result_panel(ui: &Ui, world: &World, fusions: &[(ArtifactKind, u8)], next_boss: &BossDef) -> ResultAction {
     let (w, h) = (screen_width(), screen_height());
     draw_rectangle(0.0, 0.0, w, h, Color::new(0.0, 0.0, 0.0, 0.55));
     let pw = 520.0;
@@ -412,12 +461,14 @@ pub fn result_panel(ui: &Ui, world: &World, fusions: &[(ArtifactKind, u8)]) -> R
         let what = if tier >= MAX_ARTIFACT_TIER { "is now Legendary!".to_string() } else { format!("fused to tier {tier}!") };
         loot_lines.push((format!("→ {} {what}", a.name()), tier_color(tier)));
     }
-    let ph = 360.0 + world.stats.len() as f32 * 26.0 + loot_lines.len() as f32 * 22.0 + 10.0;
+    let ph = 384.0 + world.stats.len() as f32 * 26.0 + loot_lines.len() as f32 * 22.0 + 10.0;
     let (px, py) = ((w - pw) / 2.0, (h - ph) / 2.0);
     draw_rectangle(px, py, pw, ph, PANEL);
     draw_rectangle_lines(px, py, pw, ph, 2.0, BORDER);
     let victory = world.phase == Phase::Victory;
     ui.centered(if victory { "Victory" } else { "Defeat" }, w / 2.0, py + 56.0, 40, if victory { ACCENT } else { DANGER });
+    let next = if victory { format!("Next boss: {}", next_boss.name) } else { format!("Try again: {}", next_boss.name) };
+    ui.centered(&next, w / 2.0, py + 84.0, 16, boss_color(next_boss.kind));
     let end = world.end_time.unwrap_or(world.time);
     let clear = world.clear_time;
     let boss = world.boss_start.map(|s| end - s);
@@ -428,13 +479,13 @@ pub fn result_panel(ui: &Ui, world: &World, fusions: &[(ArtifactKind, u8)]) -> R
         format!("Kills: {}    peak: {:.0} kills/min", world.kills, world.peak_kills_per_minute),
     ];
     for (i, l) in lines.iter().enumerate() {
-        ui.text(l, px + 40.0, py + 100.0 + i as f32 * 28.0, 20, TEXT);
+        ui.text(l, px + 40.0, py + 124.0 + i as f32 * 28.0, 20, TEXT);
     }
-    ui.text("Loot", px + 40.0, py + 216.0, 18, ACCENT);
+    ui.text("Loot", px + 40.0, py + 240.0, 18, ACCENT);
     for (i, (line, color)) in loot_lines.iter().enumerate() {
-        ui.text(line, px + 56.0, py + 242.0 + i as f32 * 22.0, 17, *color);
+        ui.text(line, px + 56.0, py + 266.0 + i as f32 * 22.0, 17, *color);
     }
-    stats_panel(ui, world, px + 90.0, py + 252.0 + loot_lines.len() as f32 * 22.0);
+    stats_panel(ui, world, px + 90.0, py + 276.0 + loot_lines.len() as f32 * 22.0);
     let by = py + ph - 60.0;
     let replay = ui.button(Rect::new(px + 40.0, by, 210.0, 40.0), "Replay, new map (R)", true, true);
     let edit = ui.button(Rect::new(px + 270.0, by, 210.0, 40.0), "Edit build (B)", true, false);
