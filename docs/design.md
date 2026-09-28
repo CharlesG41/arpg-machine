@@ -441,13 +441,12 @@ Les modèles écartés, pour mémoire : zone à explorer à la PoE (trop de cont
 et de backtracking), arène à vagues (pas d'avancée), couloir (répétitif). Des
 éléments d'arène pourraient revenir comme événements dans une map.
 
-### Choisir la prochaine map (décidé)
+### La prochaine map est imposée (décidé)
 
-Après chaque map, tu choisis **parmi 3 maps**. Pour chacune, tu vois ses
-**modificateurs et son boss** avant d'entrer. C'est le pilier de God Tower :
-lire ce qui s'en vient et préparer son build. Avec le respec gratuit, tu peux
-ajuster ton arbre avant d'entrer. Pas de maps en objets (PoE), et donc pas de
-problème de réserve de maps.
+Pas de choix de map : **la map est imposée, et il faut vaincre son boss**. On
+avait envisagé un choix parmi 3 maps (modificateurs et boss visibles) ; c'est
+écarté. Pas de maps en objets (PoE) non plus, donc pas de réserve de maps à
+gérer. Le seul réglage avant d'entrer reste le tier de map.
 
 ### Après le niveau 50 (décidé)
 
@@ -497,9 +496,9 @@ l'esprit des Boss Contracts de God Tower) :
   inverse l'adjacence pendant quelques secondes.
 
 **Reco : chaque boss combine au moins une mécanique de positionnement et une
-mécanique de build.** Comme le boss est visible dans le choix parmi 3 maps, et
-que le respec est gratuit, tu peux ajuster ton build pour le contrer. C'est le
-pilier de God Tower : lire ce qui s'en vient et préparer sa machine.
+mécanique de build.** Avec le respec gratuit, un boss qui bat ton build te
+pousse à revoir ta machine avant de réessayer. (Ouvert : annoncer le boss
+avant d'entrer, pour qu'on puisse s'y préparer dès le premier essai?)
 
 Décidé :
 - **Durée d'un combat de boss : 30 à 60 secondes**, dans une map de 3 à 5
@@ -522,8 +521,7 @@ Exemple de boss qui combine les deux familles :
   (Ancient) durent jusqu'à la fin de la map, boss compris. Ils donnent une
   raison de bouger et de choisir un chemin.
 - **Modificateurs de map** (plus tard) dans l'esprit des Boss Contracts :
-  risque visible et opt-in, contre plus de loot. Avec le choix parmi 3 maps,
-  les modificateurs sont visibles avant d'entrer. Les 20 Boss Contracts de
+  risque visible et opt-in, contre plus de loot. Les 20 Boss Contracts de
   God Tower sont un bon point de départ.
 - La courbe exacte des tiers par rapport au niveau du personnage.
 

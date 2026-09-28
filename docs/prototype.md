@@ -174,4 +174,4 @@ cargo run --release --example catalogue
 ## Pas dans le prototype
 
 Portail de l'arbre, sorts légendaires, supports sur le dash, modificateurs de
-map, choix de map, plusieurs boss.
+map, plusieurs boss.

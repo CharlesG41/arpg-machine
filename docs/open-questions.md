@@ -54,7 +54,8 @@
 - **Pas de campagne.** Les maps commencent dès le niveau 1.
 - **Map infinie**, générée autour de toi, avec des **sanctuaires** à
   ramasser (buffs de 30 s, ou jusqu'à la fin de la map pour les rares).
-- **Choix parmi 3 maps** après chaque map, avec modificateurs et boss visibles.
+- **La map est imposée** : pas de choix de map, il faut vaincre le boss. Le
+  seul réglage avant d'entrer est le tier de map.
 - **Tiers infinis après le niveau 50**, avec un classement par seed.
 - **Sorts adaptés du catalogue de God Tower** (250 sorts, 15 familles), avec
   les stats AD / AP / PR / MR. 231 sorts adaptés
