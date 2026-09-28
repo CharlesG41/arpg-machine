@@ -5,7 +5,7 @@ use arpg_machine::content::presets;
 use arpg_machine::world::{autopilot, Phase, World};
 
 fn main() {
-    let tier: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(0);
+    let tier: u32 = std::env::args().nth(1).and_then(|a| a.parse().ok()).unwrap_or(1);
     let seeds = [1u64, 2, 3, 4, 5];
     println!("tier {tier}, seeds {seeds:?}\n");
     println!("{:<12} {:>8} {:>8} {:>8} {:>9} {:>7} {:>7}", "build", "clear s", "boss s", "total s", "peak k/m", "kills", "wins");

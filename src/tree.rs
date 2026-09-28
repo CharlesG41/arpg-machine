@@ -40,6 +40,14 @@ impl SkillTree {
         let mut rng = Rng::new(seed ^ 0x7EE5_7EE5);
         let mut pool: Vec<SpellId> = SpellId::all().collect();
         shuffle(&mut rng, &mut pool);
+        // The six exits come first in the pool. A new character must be able to
+        // kill things, so at least four of them deal damage.
+        let damaging = |s: &SpellId| s.hits_enemies();
+        while pool[..6].iter().filter(|s| damaging(s)).count() < 4 {
+            let weak = pool[..6].iter().position(|s| !damaging(s)).unwrap();
+            let strong = 6 + pool[6..].iter().position(damaging).unwrap();
+            pool.swap(weak, strong);
+        }
 
         let mut positions = vec![V2::ZERO];
         let rotation = rng.range(0.0, TAU);
@@ -169,6 +177,11 @@ impl SkillTree {
         let mut acquired = vec![false; nodes.len()];
         acquired[ORIGIN] = true;
         SkillTree { seed, nodes, acquired, points }
+    }
+
+    /// Discovery: you see what you own and the nodes right next to it.
+    pub fn visible(&self, id: usize) -> bool {
+        self.acquired[id] || self.nodes[id].neighbors.iter().any(|&n| self.acquired[n])
     }
 
     pub fn spent(&self) -> u32 {
@@ -336,6 +349,27 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn exits_mostly_deal_damage() {
+        for seed in 0..50 {
+            let tree = SkillTree::generate(seed, 7);
+            let damaging = tree.nodes[ORIGIN].neighbors.iter().filter(|&&n| tree.nodes[n].spell.unwrap().hits_enemies()).count();
+            assert!(damaging >= 4, "seed {seed}: {damaging} damaging exits");
+        }
+    }
+
+    #[test]
+    fn discovery_reveals_neighbors_of_owned_nodes() {
+        let mut tree = SkillTree::generate(5, 7);
+        let exits = tree.nodes[ORIGIN].neighbors.clone();
+        let hidden = (1..tree.nodes.len()).filter(|&i| !tree.visible(i)).count();
+        assert!(exits.iter().all(|&e| tree.visible(e)));
+        assert!(hidden > tree.nodes.len() / 2);
+        assert!(tree.acquire(exits[0]));
+        let after = (1..tree.nodes.len()).filter(|&i| !tree.visible(i)).count();
+        assert!(after < hidden);
     }
 
     #[test]

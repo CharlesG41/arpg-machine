@@ -8,7 +8,7 @@ use arpg_machine::content::{Build, Delivery, Slot, SpellId};
 use arpg_machine::world::{autopilot, World};
 
 fn run(build: Build) -> (u32, f32) {
-    let mut world = World::new(build, 7, 0);
+    let mut world = World::new(build, 7, 1);
     world.god_mode = true;
     while world.time < 60.0 {
         let input = autopilot(&world);

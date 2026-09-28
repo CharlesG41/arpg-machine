@@ -43,13 +43,22 @@ cargo run --release --example catalogue
 
 ## Contenu
 
+- **Personnage** : on commence niveau 1 avec **7 points d'arbre**, +1 par
+  niveau (max 50). L'XP vient des kills (Grunt/Runner 1, Caster 2, Brute 6,
+  boss 60, +25 % par tier) et s'ajoute à la fin de la map, même après une
+  défaite ou un Échap. Il faut 400 × niveau^1,1 XP par niveau : environ 2
+  niveaux sur la première map, puis 1 niveau toutes les 1 ou 2 maps. La
+  capacité d'artefacts suit le niveau (2 au niveau 1, puis 3/4/5/6/7 aux
+  niveaux 5/10/18/28/40). Le bouton « +1 lvl » sert aux tests.
+- **Découverte de l'arbre** : on ne voit que ses nœuds et ceux juste à côté ;
+  des amorces de lignes montrent qu'il y a autre chose plus loin. Au moins 4
+  des 6 sorties de l'Origin font des dégâts.
 - **Skill tree** généré à partir d'une seed, sur le modèle de God Tower : une
   Origin, 6 sorties, une grappe de 5 sorts derrière chaque sortie, et des ponts
   entre grappes voisines. Chaque sort apparaît une seule fois ; seule la
   disposition change. Acheter un nœud achète le chemin le plus court depuis ce
   qu'on possède déjà, 1 point par nœud. Rembourser un nœud rembourse aussi ce
-  qui ne tient plus à l'Origin. 25 points par défaut (réglable jusqu'à 60 :
-  ça remplace les niveaux).
+  qui ne tient plus à l'Origin.
 - **231 sorts adaptés du catalogue de God Tower**, dans les 15 familles (voir
   [spell-adaptation.md](spell-adaptation.md)). Chaque sort = une livraison
   (projectile, chaîne, nova, cône, blast, zone, orbite, sur soi) + ses effets
@@ -83,10 +92,14 @@ cargo run --release --example catalogue
   - hexagone (Brute, rare), 30 / 0 : quand tu es proche, il prépare un slam au
     sol télégraphié (0,9 s) ;
   - octogone (boss). Chaque boss a ses propres stats : l'Ember Warden a
-    4000 PV, 25 PR, 40 MR. Cercles de feu télégraphiés ; à 50 % de PV,
+    1000 PV, 20 PR, 25 MR (30 à 60 s pour un personnage niveau 1 au tier 1). Cercles de feu télégraphiés ; à 50 % de PV,
     immunisé au Burn 15 s et 3 vagues d'adds.
 - **Anti-overkill**, **momentum** (cap 20, décroissance 2 s), **Barrier**.
-- **Tier** : +30 % PV et +20 % dégâts des ennemis par tier.
+- **Tiers de map** (comme les difficultés de Diablo) : on commence au tier 1.
+  Battre le boss d'un tier débloque le suivant, au niveau du compte (sauvegardé
+  dans `~/.arpg-machine/account.txt`). Chaque tier au-dessus de 1 : ennemis
+  +30 % PV et +20 % dégâts (cumulatifs), +25 % d'XP. L'en-tête affiche ce que le
+  tier choisi change.
 
 ## Architecture
 

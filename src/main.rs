@@ -76,6 +76,8 @@ async fn main() {
     let mut use_autopilot = env("ARPG_AUTOPILOT").is_some();
     let mut dash_queued = false;
     let mut result_delay = 0.0f32;
+    // Experience from the current map goes to the character once, when it ends.
+    let mut xp_banked = false;
     let shot_path = env("ARPG_SHOT");
     let shot_at: f32 = env("ARPG_SHOT_AT").and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let mut screen_time = 0.0f32;
@@ -113,6 +115,7 @@ async fn main() {
                     fx = Fx::new();
                     accumulator = 0.0;
                     result_delay = 0.0;
+                    xp_banked = false;
                     screen = Screen::Play;
                     screen_time = 0.0;
                 }
@@ -121,6 +124,11 @@ async fn main() {
                 let w = world.as_mut().expect("a map is running");
                 if matches!(screen, Screen::Play) {
                     if is_key_pressed(KeyCode::Escape) {
+                        // Leaving early keeps the experience (light death penalty, design §9).
+                        if !xp_banked {
+                            planner.gain_xp(w.xp);
+                            xp_banked = true;
+                        }
                         screen = Screen::Plan;
                         next_frame().await;
                         continue;
@@ -150,6 +158,13 @@ async fn main() {
                         result_delay += frame;
                         if result_delay > 1.2 {
                             screen = Screen::Result;
+                            if !xp_banked {
+                                planner.gain_xp(w.xp);
+                                if w.phase == Phase::Victory {
+                                    planner.record_victory(w.tier);
+                                }
+                                xp_banked = true;
+                            }
                         }
                     }
                 }
@@ -158,7 +173,8 @@ async fn main() {
                 let camera = render::fix_camera(fx.camera(w));
                 render::draw_world(w, &fx, &camera);
                 set_default_camera();
-                ui::hud(&ui, w, &fx, show_stats, use_autopilot);
+                let pending = if xp_banked { 0 } else { w.xp };
+                ui::hud(&ui, w, &fx, show_stats, use_autopilot, planner.character, pending);
                 if matches!(screen, Screen::Result) {
                     match ui::result_panel(&ui, w) {
                         ResultAction::Replay => {
@@ -166,6 +182,7 @@ async fn main() {
                             *w = World::new(planner.build.clone(), map_seed, planner.tier);
                             fx = Fx::new();
                             result_delay = 0.0;
+                            xp_banked = false;
                             screen = Screen::Play;
                         }
                         ResultAction::Edit => screen = Screen::Plan,

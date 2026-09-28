@@ -2,6 +2,8 @@
 //! artifacts are dragged into place.
 use crate::render::family_color;
 use crate::ui::{Tooltip, Ui, ACCENT, BORDER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
+use arpg_machine::account::{tier_scaling, Account};
+use arpg_machine::character::Character;
 use arpg_machine::content::{presets, ArtifactKind, Build, Family, SpellId, SupportKind};
 use arpg_machine::math::V2;
 use arpg_machine::tree::{SkillTree, ORIGIN};
@@ -42,7 +44,6 @@ pub enum PlanAction {
 }
 
 const HEADER: f32 = 76.0;
-pub const DEFAULT_POINTS: u32 = 25;
 const CARD_H: f32 = 92.0;
 const DRAG_THRESHOLD: f32 = 5.0;
 
@@ -88,6 +89,8 @@ fn v2(p: V2) -> Vec2 {
 }
 
 pub struct Planner {
+    pub account: Account,
+    pub character: Character,
     pub tree: SkillTree,
     pub build: Build,
     pub tier: u32,
@@ -107,10 +110,16 @@ pub struct Planner {
 
 impl Planner {
     pub fn new(seed: u64) -> Self {
+        let character = Character::default();
+        let mut build = Build::empty();
+        build.artifact_capacity = character.artifact_capacity();
+        let account = Account::load();
         Planner {
-            tree: SkillTree::generate(seed, DEFAULT_POINTS),
-            build: Build::empty(),
-            tier: 0,
+            account,
+            character,
+            tree: SkillTree::generate(seed, character.skill_points()),
+            build,
+            tier: account.max_tier,
             sandbox: false,
             tab: Tab::Tree,
             pan: Vec2::ZERO,
@@ -158,16 +167,49 @@ impl Planner {
         self.notice = Some((message.to_string(), 3.0));
     }
 
+    /// A fresh level-1 character with a new tree.
     pub fn new_character(&mut self) {
+        self.character = Character::default();
         let seed = self.tree.seed.wrapping_add(1);
-        self.tree = SkillTree::generate(seed, self.tree.points);
+        self.tree = SkillTree::generate(seed, self.character.skill_points());
         self.fitted = false;
-        self.prune();
+        self.sync_character();
     }
 
     pub fn load_preset(&mut self, build: Build) {
         self.sandbox = true;
         self.build = build;
+        self.sync_character();
+    }
+
+    /// Skill points and artifact capacity follow the level (sandbox keeps the maximum).
+    fn sync_character(&mut self) {
+        self.tree.set_points(self.character.skill_points());
+        self.build.artifact_capacity =
+            if self.sandbox { Build::ARTIFACT_CAPACITY } else { self.character.artifact_capacity() };
+        while self.build.artifacts_used() > self.build.artifact_capacity {
+            self.build.artifacts.pop();
+        }
+        self.prune();
+    }
+
+    /// A boss kill: may unlock the next tier (saved on the account).
+    pub fn record_victory(&mut self, tier: u32) {
+        if let Some(unlocked) = self.account.record_victory(tier) {
+            self.account.save();
+            self.say(&format!("Tier {unlocked} unlocked!"));
+        }
+    }
+
+    /// Experience from a map. Returns the levels gained.
+    pub fn gain_xp(&mut self, xp: u32) -> u32 {
+        let levels = self.character.add_xp(xp);
+        if levels > 0 {
+            let plural = if levels > 1 { "s" } else { "" };
+            self.say(&format!("Level {}! +{levels} skill point{plural}.", self.character.level));
+        }
+        self.sync_character();
+        levels
     }
 
     pub fn draw(&mut self, ui: &Ui) -> PlanAction {
@@ -192,12 +234,27 @@ impl Planner {
         if is_key_pressed(KeyCode::Tab) {
             self.tab = if self.tab == Tab::Tree { Tab::Loadout } else { Tab::Tree };
         }
-        ui.text(&format!("Map tier {}", self.tier), w - 520.0, 46.0, 20, TEXT);
-        if ui.button(Rect::new(w - 410.0, 22.0, 36.0, 34.0), "-", self.tier > 0, false) {
+        // Map tier: like Diablo's difficulties, unlocked one by one by beating the boss.
+        self.tier = self.tier.clamp(1, self.account.max_tier);
+        ui.text(&format!("Tier {}", self.tier), w - 560.0, 38.0, 22, TEXT);
+        ui.text(&format!("max {}", self.account.max_tier), w - 560.0, 58.0, 13, MUTED);
+        if ui.button(Rect::new(w - 480.0, 20.0, 34.0, 34.0), "-", self.tier > 1, false) {
             self.tier -= 1;
         }
-        if ui.button(Rect::new(w - 368.0, 22.0, 36.0, 34.0), "+", true, false) {
+        let can_raise = self.tier < self.account.max_tier;
+        if ui.button(Rect::new(w - 440.0, 20.0, 34.0, 34.0), "+", can_raise, false) {
             self.tier += 1;
+        }
+        let t = tier_scaling(self.tier);
+        let info = if self.tier == 1 {
+            "Base difficulty".to_string()
+        } else {
+            format!("Enemies ×{:.1} HP, ×{:.1} dmg · ×{:.2} XP", t.health, t.damage, t.xp)
+        };
+        ui.text(&info, w - 480.0, 70.0, 12, MUTED);
+        let hover_plus = Rect::new(w - 440.0, 20.0, 34.0, 34.0).contains(crate::ui::mouse());
+        if hover_plus && !can_raise {
+            ui.text(&format!("Beat the Tier {} boss to unlock Tier {}", self.tier, self.tier + 1), w - 560.0, 94.0, 14, ACCENT);
         }
         let can_play = !self.build.slots.is_empty() && self.build.is_valid();
         let label = if can_play { "Play (Enter)" } else { "Add a spell first" };
@@ -264,7 +321,11 @@ impl Planner {
         let panel = Rect::new(16.0, HEADER + 14.0, 320.0, 214.0);
         let over_panel = panel.contains(mouse);
         let in_canvas = canvas.contains(mouse) && !over_panel;
-        let hovered = if in_canvas { (0..self.tree.nodes.len()).find(|&i| self.node_rect(i).contains(mouse)) } else { None };
+        let hovered = if in_canvas {
+            (0..self.tree.nodes.len()).find(|&i| self.tree.visible(i) && self.node_rect(i).contains(mouse))
+        } else {
+            None
+        };
         let route = hovered.and_then(|id| self.tree.route_to(id)).unwrap_or_default();
         let affordable = route.len() as u32 <= self.tree.remaining();
 
@@ -314,6 +375,19 @@ impl Planner {
         let route_color = if affordable { Color::new(0.4, 0.85, 1.0, 1.0) } else { DANGER };
         for (i, node) in self.tree.nodes.iter().enumerate() {
             for &j in &node.neighbors {
+                let (vi, vj) = (self.tree.visible(i), self.tree.visible(j));
+                if !vi && !vj {
+                    continue;
+                }
+                if vi != vj {
+                    // A path leads somewhere you have not discovered yet: show its start.
+                    let (from, to) = if vi { (node.pos, self.tree.nodes[j].pos) } else { continue };
+                    let a = self.to_screen(from);
+                    let b = a + (self.to_screen(to) - a) * 0.3;
+                    draw_line(a.x, a.y, b.x, b.y, (2.0 * self.zoom).max(1.5), Color::new(0.2, 0.22, 0.28, 1.0));
+                    draw_circle(b.x, b.y, 3.0, Color::new(0.3, 0.32, 0.4, 1.0));
+                    continue;
+                }
                 if j < i {
                     continue;
                 }
@@ -333,7 +407,7 @@ impl Planner {
         let z = self.zoom;
         for id in 0..self.tree.nodes.len() {
             let r = self.node_rect(id);
-            if !r.overlaps(&canvas) {
+            if !r.overlaps(&canvas) || !self.tree.visible(id) {
                 continue;
             }
             let node = &self.tree.nodes[id];
@@ -373,29 +447,30 @@ impl Planner {
         // Points panel (stands in for character levels: 1 point per level).
         draw_rectangle(panel.x, panel.y, panel.w, panel.h, PANEL);
         draw_rectangle_lines(panel.x, panel.y, panel.w, panel.h, 1.0, BORDER);
-        ui.text(&format!("Skill points: {} / {}", self.tree.remaining(), self.tree.points), panel.x + 16.0, panel.y + 32.0, 22, ACCENT);
-        if ui.button(Rect::new(panel.x + 230.0, panel.y + 10.0, 36.0, 32.0), "-", self.tree.points > 0, false) {
-            let points = self.tree.points - 1;
-            self.tree.set_points(points);
-            self.prune();
-        }
-        if ui.button(Rect::new(panel.x + 272.0, panel.y + 10.0, 36.0, 32.0), "+", self.tree.points < 60, false) {
-            let points = self.tree.points + 1;
-            self.tree.set_points(points);
-        }
-        ui.text("1 point per level in the full game.", panel.x + 16.0, panel.y + 58.0, 15, MUTED);
-        if ui.button(Rect::new(panel.x + 16.0, panel.y + 72.0, 140.0, 34.0), "Reset (free)", self.tree.spent() > 0, false) {
+        ui.text(&format!("Level {}", self.character.level), panel.x + 16.0, panel.y + 32.0, 22, TEXT);
+        ui.text(&format!("Skill points: {} / {}", self.tree.remaining(), self.tree.points), panel.x + 110.0, panel.y + 32.0, 20, ACCENT);
+        let xp_bar = Rect::new(panel.x + 16.0, panel.y + 44.0, panel.w - 32.0, 8.0);
+        draw_rectangle(xp_bar.x, xp_bar.y, xp_bar.w, xp_bar.h, Color::new(0.0, 0.0, 0.0, 0.6));
+        draw_rectangle(xp_bar.x, xp_bar.y, xp_bar.w * self.character.level_fraction(), xp_bar.h, Color::new(0.55, 0.45, 1.0, 1.0));
+        let next = Character::xp_to_next(self.character.level);
+        ui.text(&format!("XP {} / {}  ·  +1 point per level", self.character.xp, next), panel.x + 16.0, panel.y + 66.0, 14, MUTED);
+        if ui.button(Rect::new(panel.x + 16.0, panel.y + 76.0, 140.0, 32.0), "Reset (free)", self.tree.spent() > 0, false) {
             self.tree.reset();
             self.prune();
         }
-        if ui.button(Rect::new(panel.x + 164.0, panel.y + 72.0, 140.0, 34.0), "Center view", true, false) {
+        if ui.button(Rect::new(panel.x + 164.0, panel.y + 76.0, 140.0, 32.0), "Center view", true, false) {
             self.fitted = false;
         }
-        if ui.button(Rect::new(panel.x + 16.0, panel.y + 114.0, 288.0, 34.0), "New character (new tree)", true, false) {
+        if ui.button(Rect::new(panel.x + 16.0, panel.y + 116.0, 200.0, 32.0), "New character", true, false) {
             self.new_character();
-            self.say(&format!("New character: tree seed {}.", self.tree.seed));
+            self.say(&format!("New level-1 character: tree seed {}.", self.tree.seed));
         }
-        ui.text(&format!("Tree seed {}", self.tree.seed), panel.x + 16.0, panel.y + 172.0, 15, MUTED);
+        // Testing shortcut until levels take hours to earn.
+        if ui.button(Rect::new(panel.x + 224.0, panel.y + 116.0, 80.0, 32.0), "+1 lvl", true, false) {
+            let need = Character::xp_to_next(self.character.level) - self.character.xp;
+            self.gain_xp(need);
+        }
+        ui.text(&format!("Tree seed {}  ·  you see only what is next to your spells", self.tree.seed), panel.x + 16.0, panel.y + 172.0, 13, MUTED);
         ui.text("Left click: buy · Right click: refund", panel.x + 16.0, panel.y + 190.0, 15, MUTED);
         ui.text("Drag: move · Wheel: zoom", panel.x + 16.0, panel.y + 206.0, 15, MUTED);
 
@@ -785,7 +860,7 @@ impl Planner {
         let py = details.bottom() + 30.0;
         if ui.button(Rect::new(BAR_X, py, 260.0, 36.0), if self.sandbox { "Sandbox: ON (all spells)" } else { "Sandbox: OFF (tree spells)" }, true, self.sandbox) {
             self.sandbox = !self.sandbox;
-            self.prune();
+            self.sync_character();
         }
         ui.text("Ready builds (sandbox):", BAR_X, py + 70.0, 16, MUTED);
         for (k, (name, preset)) in presets().into_iter().enumerate() {

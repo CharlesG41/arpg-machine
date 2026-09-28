@@ -131,8 +131,9 @@ pub struct BossDef {
     pub contact_dps: f32,
 }
 
+/// The first boss: a fight of 30 to 60 s for a fresh character at tier 1.
 pub const EMBER_WARDEN: BossDef =
-    BossDef { name: "Ember Warden", hp: 4000.0, armor: 25.0, mr: 40.0, speed: 62.0, contact_dps: 40.0 };
+    BossDef { name: "Ember Warden", hp: 1000.0, armor: 20.0, mr: 25.0, speed: 62.0, contact_dps: 40.0 };
 
 impl EnemyKind {
     fn hp(self) -> f32 {
@@ -186,6 +187,16 @@ impl EnemyKind {
             EnemyKind::Brute => 25.0,
             EnemyKind::Boss => EMBER_WARDEN.contact_dps,
             EnemyKind::Add => 10.0,
+        }
+    }
+
+    /// Experience for killing one (before the tier bonus).
+    fn xp(self) -> u32 {
+        match self {
+            EnemyKind::Grunt | EnemyKind::Runner | EnemyKind::Add => 1,
+            EnemyKind::Caster => 2,
+            EnemyKind::Brute => 6,
+            EnemyKind::Boss => 60,
         }
     }
 
@@ -577,6 +588,8 @@ pub struct World {
     pub boss: Option<BossState>,
     pub stats: Vec<SpellStats>,
     pub kills: u32,
+    /// Experience earned this map.
+    pub xp: u32,
     kill_times: VecDeque<f32>,
     pub peak_kills_per_minute: f32,
     pub clear_time: Option<f32>,
@@ -672,6 +685,7 @@ impl World {
             boss: None,
             stats,
             kills: 0,
+            xp: 0,
             kill_times: VecDeque::new(),
             peak_kills_per_minute: 0.0,
             clear_time: None,
@@ -688,11 +702,11 @@ impl World {
     }
 
     fn hp_mult(&self) -> f32 {
-        1.3f32.powi(self.tier as i32)
+        crate::account::tier_scaling(self.tier).health
     }
 
     fn damage_mult(&self) -> f32 {
-        1.2f32.powi(self.tier as i32)
+        crate::account::tier_scaling(self.tier).damage
     }
 
     fn spawn(&mut self, kind: EnemyKind, pos: V2, awake: bool) -> usize {
@@ -987,6 +1001,23 @@ impl World {
 
     pub fn awake_enemies(&self) -> usize {
         self.enemies.iter().filter(|e| e.alive && e.awake).count()
+    }
+
+    /// How close you must stand for every damaging spell on the bar to reach
+    /// its target (the shortest reach among them).
+    pub fn preferred_range(&self) -> f32 {
+        self.slots
+            .iter()
+            .filter(|s| s.spell.hits_enemies())
+            .map(|s| match s.spell.delivery() {
+                Delivery::Projectile { .. } => PROJECTILE_RANGE,
+                Delivery::Chain { .. } | Delivery::Blast { .. } | Delivery::Zone { .. } => TARGET_RANGE,
+                Delivery::Nova { radius } => radius * self.area(s.support),
+                Delivery::Cone { range } => range,
+                Delivery::Orbit => ORBIT_RADIUS,
+                Delivery::SelfCast => f32::MAX,
+            })
+            .fold(f32::MAX, f32::min)
     }
 
     pub fn thorns_active(&self) -> bool {
@@ -2260,6 +2291,8 @@ impl World {
             let e = self.enemies[index].clone();
             self.kills += 1;
             self.last_kill = self.time;
+            // Higher tiers are worth more experience.
+            self.xp += (e.kind.xp() as f32 * crate::account::tier_scaling(self.tier).xp).round() as u32;
             self.kill_times.push_back(self.time);
             if let Some(stats) = self.stats.get_mut(e.last_source as usize) {
                 stats.kills += 1;
@@ -2451,15 +2484,17 @@ pub fn autopilot(world: &World) -> Input {
             return Input { move_dir: dir, dash: false };
         }
     }
-    // During the boss fight, stay at casting distance from the boss.
+    // During the boss fight, stand where every damaging spell reaches the boss.
     if let Some(boss) = world.boss.as_ref().filter(|b| world.enemies.get(b.index).is_some_and(|e| e.alive)) {
         let to_boss = world.enemies[boss.index].pos - p;
         let d = to_boss.len();
+        let far = (world.preferred_range() * 0.8).clamp(110.0, 420.0);
+        let near = (far - 110.0).max(70.0);
         let close_add = world.enemies.iter().any(|e| e.alive && e.awake && e.kind != EnemyKind::Boss && e.pos.dist_sq(p) < 70.0 * 70.0);
         if !close_add {
-            let dir = if d > 420.0 {
+            let dir = if d > far {
                 to_boss.norm()
-            } else if d < 300.0 {
+            } else if d < near {
                 (-to_boss).norm().rotate(0.6)
             } else {
                 to_boss.norm().rotate(1.5)
@@ -2506,7 +2541,7 @@ mod tests {
     use crate::content::{presets, Slot};
 
     fn run(build: Build, seed: u64, max_seconds: f32) -> World {
-        let mut world = World::new(build, seed, 0);
+        let mut world = World::new(build, seed, 1);
         while world.time < max_seconds && !matches!(world.phase, Phase::Victory | Phase::Defeat) {
             let input = autopilot(&world);
             world.step(&input);
@@ -2525,7 +2560,7 @@ mod tests {
 
     /// A world with one awake enemy of `kind` next to the player.
     fn duel(build: Build, kind: EnemyKind) -> (World, usize) {
-        let mut world = World::new(build, 1, 0);
+        let mut world = World::new(build, 1, 1);
         world.enemies.clear();
         let pos = world.player.pos + V2::new(80.0, 0.0);
         let index = world.spawn(kind, pos, true);
@@ -2535,15 +2570,15 @@ mod tests {
 
     #[test]
     fn same_seed_same_map() {
-        let a = World::new(preset("Starter"), 9, 0);
-        let b = World::new(preset("Starter"), 9, 0);
+        let a = World::new(preset("Starter"), 9, 1);
+        let b = World::new(preset("Starter"), 9, 1);
         assert_eq!(a.enemies.len(), b.enemies.len());
         assert!(a.enemies.iter().zip(&b.enemies).all(|(x, y)| x.pos == y.pos && x.kind == y.kind));
     }
 
     #[test]
     fn maps_have_every_pack_enemy_shape() {
-        let world = World::new(preset("Starter"), 5, 0);
+        let world = World::new(preset("Starter"), 5, 1);
         for kind in [EnemyKind::Grunt, EnemyKind::Runner, EnemyKind::Caster, EnemyKind::Brute] {
             assert!(world.enemies.iter().any(|e| e.kind == kind), "{kind:?} missing");
         }
@@ -2719,7 +2754,7 @@ mod tests {
 
     #[test]
     fn the_map_never_ends() {
-        let mut world = World::new(preset("Starter"), 2, 0);
+        let mut world = World::new(preset("Starter"), 2, 1);
         // Walk straight up for a long way: new packs keep appearing ahead.
         for _ in 0..(120.0 / DT) as usize {
             world.step(&Input { move_dir: V2::new(0.0, -1.0), dash: false });
@@ -2736,15 +2771,15 @@ mod tests {
 
     #[test]
     fn chunks_are_deterministic() {
-        let a = World::new(preset("Starter"), 11, 0);
-        let b = World::new(preset("Starter"), 11, 0);
+        let a = World::new(preset("Starter"), 11, 1);
+        let b = World::new(preset("Starter"), 11, 1);
         let pos = |w: &World| w.shrines.iter().map(|s| (s.pos.x, s.pos.y)).collect::<Vec<_>>();
         assert_eq!(pos(&a), pos(&b));
     }
 
     #[test]
     fn shrines_grant_their_modifier() {
-        let mut world = World::new(Build::empty(), 1, 0);
+        let mut world = World::new(Build::empty(), 1, 1);
         world.shrines.clear();
         let pos = world.player.pos + V2::new(10.0, 0.0);
         world.shrines.push(Shrine { id: 999, pos, kind: ShrineKind::Fury, chunk: (0, 0) });
@@ -2759,7 +2794,7 @@ mod tests {
 
     #[test]
     fn ancient_shrines_last_through_the_boss_and_stack() {
-        let mut world = World::new(Build::empty(), 1, 0);
+        let mut world = World::new(Build::empty(), 1, 1);
         for id in 0..2 {
             world.shrines.push(Shrine { id: 500 + id, pos: world.player.pos, kind: ShrineKind::Ancient, chunk: (0, 0) });
         }
@@ -2772,7 +2807,7 @@ mod tests {
 
     #[test]
     fn momentum_caps_and_decays() {
-        let mut world = World::new(preset("Starter"), 1, 0);
+        let mut world = World::new(preset("Starter"), 1, 1);
         world.momentum = MOMENTUM_MAX;
         world.momentum_timer = 0.0;
         for _ in 0..((MOMENTUM_DECAY / DT) as usize + 2) {
@@ -2784,7 +2819,7 @@ mod tests {
     #[test]
     fn artifacts_change_the_player() {
         let build = Build::new(vec![], vec![ArtifactKind::Bloodstone, ArtifactKind::QuickBoots, ArtifactKind::SagesRing]);
-        let world = World::new(build, 1, 0);
+        let world = World::new(build, 1, 1);
         assert_eq!(world.max_hp(), BASE_HP + 100.0);
         assert!(world.player.dash_cooldown_max < DASH_COOLDOWN);
         assert_eq!(world.stat(Stat::Ap), BASE_AP + 15.0);
@@ -2792,7 +2827,7 @@ mod tests {
 
     #[test]
     fn barrier_absorbs_after_resistances() {
-        let mut world = World::new(Build::empty(), 1, 0);
+        let mut world = World::new(Build::empty(), 1, 1);
         world.player.barrier = 1000.0;
         world.hurt_player(120.0, false);
         let expected = mitigate(120.0, BASE_ARMOR);

@@ -1,5 +1,6 @@
 //! Shared interface helpers, the in-map HUD and the result panel.
 use crate::render::{family_color, shrine_color, VIEW_WIDTH};
+use arpg_machine::character::Character;
 use arpg_machine::world::{Phase, ShrineKind, World, MOMENTUM_MAX, PROGRESS_NEEDED};
 use macroquad::prelude::*;
 
@@ -152,7 +153,7 @@ fn bar(x: f32, y: f32, w: f32, h: f32, frac: f32, fill: Color) {
     draw_rectangle_lines(x, y, w, h, 1.0, BORDER);
 }
 
-pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, autopilot: bool) {
+pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, autopilot: bool, character: Character, pending_xp: u32) {
     let (w, h) = (screen_width(), screen_height());
 
     // Progress or boss health, top center.
@@ -204,8 +205,20 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
     for (i, l) in lines.iter().enumerate() {
         ui.text(l, 20.0, 30.0 + i as f32 * 22.0, 18, if i == 2 { ACCENT } else { TEXT });
     }
+    // Level: the character plus what this map has earned so far.
+    let mut projected = character;
+    let gained = projected.add_xp(pending_xp);
+    let ly = 30.0 + lines.len() as f32 * 22.0 + 8.0;
+    let level_text = if gained > 0 {
+        format!("Level {} (+{gained} this map, spend points after)", projected.level)
+    } else {
+        format!("Level {}", projected.level)
+    };
+    ui.text(&level_text, 20.0, ly, 18, if gained > 0 { ACCENT } else { TEXT });
+    bar(20.0, ly + 6.0, 220.0, 6.0, projected.level_fraction(), Color::new(0.55, 0.45, 1.0, 1.0));
+
     // Shrine modifiers still running.
-    let mut by = 30.0 + lines.len() as f32 * 22.0 + 12.0;
+    let mut by = ly + 36.0;
     for (kind, left) in &world.shrine_buffs {
         let c = shrine_color(*kind);
         draw_rectangle(20.0, by - 12.0, 12.0, 12.0, c);

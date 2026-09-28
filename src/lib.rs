@@ -5,6 +5,8 @@
 //! renderer in the binary decides what everything looks like, so the visuals
 //! can be replaced without touching the rules.
 
+pub mod account;
+pub mod character;
 pub mod content;
 pub mod grid;
 pub mod math;
