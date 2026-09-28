@@ -7,12 +7,10 @@ use crate::content::ap;
 use crate::grid::Grid;
 use crate::math::V2;
 use crate::rng::Rng;
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 use std::f32::consts::TAU;
 
 pub const DT: f32 = 1.0 / 60.0;
-pub const MAP_W: f32 = 4200.0;
-pub const MAP_H: f32 = 4200.0;
 pub const PLAYER_RADIUS: f32 = 14.0;
 const PLAYER_SPEED: f32 = 230.0;
 const DASH_DISTANCE: f32 = 260.0;
@@ -21,7 +19,12 @@ const DASH_COOLDOWN: f32 = 1.8;
 const AGGRO_RANGE: f32 = 560.0;
 /// Self-cast spells only fire while an awake enemy is this close.
 const COMBAT_RANGE: f32 = 700.0;
-const PACKS: usize = 110;
+/// The map is endless: it is generated in square chunks around you.
+pub const CHUNK: f32 = 1200.0;
+/// Chunks within this many chunks of you exist; farther ones are forgotten.
+const GEN_RADIUS: i32 = 2;
+const FORGET_RADIUS: i32 = 4;
+const SHRINE_RADIUS: f32 = 36.0;
 pub const PROGRESS_NEEDED: f32 = 500.0;
 const BOSS_WARNING: f32 = 1.6;
 pub const MOMENTUM_MAX: u8 = 20;
@@ -69,6 +72,52 @@ pub enum EnemyKind {
     Brute,
     Boss,
     Add,
+}
+
+/// Map modifiers you pick up by walking onto them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShrineKind {
+    Fury,
+    Swiftness,
+    Haste,
+    Warding,
+    Vitality,
+    /// Rare: lasts for the rest of the map, boss included, and stacks.
+    Ancient,
+}
+
+impl ShrineKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            ShrineKind::Fury => "Shrine of Fury",
+            ShrineKind::Swiftness => "Shrine of Swiftness",
+            ShrineKind::Haste => "Shrine of Haste",
+            ShrineKind::Warding => "Shrine of Warding",
+            ShrineKind::Vitality => "Shrine of Vitality",
+            ShrineKind::Ancient => "Ancient Shrine",
+        }
+    }
+
+    pub fn effect(self) -> &'static str {
+        match self {
+            ShrineKind::Fury => "+20% damage for 30 s",
+            ShrineKind::Swiftness => "+15% movement speed for 30 s",
+            ShrineKind::Haste => "+20% cooldown rate for 30 s",
+            ShrineKind::Warding => "60 Barrier, +15 PR and MR for 30 s",
+            ShrineKind::Vitality => "Heal 30% of your max Health",
+            ShrineKind::Ancient => "+10% damage until the end of the map",
+        }
+    }
+}
+
+pub const SHRINE_DURATION: f32 = 30.0;
+
+#[derive(Clone, Debug)]
+pub struct Shrine {
+    pub id: u32,
+    pub pos: V2,
+    pub kind: ShrineKind,
+    chunk: (i32, i32),
 }
 
 /// Each boss has its own stats.
@@ -402,6 +451,9 @@ pub enum Event {
     Detonate { pos: V2, radius: f32, owner: EnemyKind },
     BossSpawned { pos: V2 },
     BossPhaseTwo { pos: V2 },
+    ShrineClaimed { pos: V2, kind: ShrineKind },
+    /// Enemy indices changed; per-enemy visual state must be reset.
+    Compacted,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -506,6 +558,12 @@ pub struct World {
     pub enemies: Vec<Enemy>,
     next_id: u32,
     grid: Grid,
+    chunks: HashSet<(i32, i32)>,
+    pub shrines: Vec<Shrine>,
+    next_shrine: u32,
+    /// Shrine effects still running: kind and seconds left (infinite for Ancient).
+    pub shrine_buffs: Vec<(ShrineKind, f32)>,
+    start: V2,
     pub projectiles: Vec<Projectile>,
     pub enemy_shots: Vec<EnemyShot>,
     pub zones: Vec<Zone>,
@@ -567,7 +625,7 @@ impl World {
                 });
             }
         }
-        let start = V2::new(MAP_W / 2.0, MAP_H / 2.0);
+        let start = V2::ZERO;
         let max_hp = BASE_HP + mods.max_hp;
         let mut world = World {
             seed,
@@ -595,7 +653,12 @@ impl World {
             },
             enemies: Vec::new(),
             next_id: 0,
-            grid: Grid::new(MAP_W, MAP_H, 80.0),
+            grid: Grid::new(80.0),
+            chunks: HashSet::new(),
+            shrines: Vec::new(),
+            next_shrine: 0,
+            shrine_buffs: Vec::new(),
+            start,
             projectiles: Vec::new(),
             enemy_shots: Vec::new(),
             zones: Vec::new(),
@@ -620,7 +683,7 @@ impl World {
             moves: Vec::new(),
             near: Vec::new(),
         };
-        world.generate(start);
+        world.ensure_chunks();
         world
     }
 
@@ -673,20 +736,50 @@ impl World {
         self.enemies.len() - 1
     }
 
-    fn generate(&mut self, start: V2) {
-        let margin = 150.0;
-        for _ in 0..PACKS {
-            let mut center = start;
-            for _ in 0..12 {
-                center = V2::new(self.rng.range(margin, MAP_W - margin), self.rng.range(margin, MAP_H - margin));
-                if center.dist(start) > 600.0 {
-                    break;
+    fn chunk_of(pos: V2) -> (i32, i32) {
+        ((pos.x / CHUNK).floor() as i32, (pos.y / CHUNK).floor() as i32)
+    }
+
+    /// Generates the chunks around you and forgets the ones far behind.
+    fn ensure_chunks(&mut self) {
+        let (px, py) = Self::chunk_of(self.player.pos);
+        for cy in py - GEN_RADIUS..=py + GEN_RADIUS {
+            for cx in px - GEN_RADIUS..=px + GEN_RADIUS {
+                if self.chunks.insert((cx, cy)) {
+                    self.generate_chunk(cx, cy);
                 }
             }
-            let count = self.rng.range_usize(8, 16);
+        }
+        let far: Vec<(i32, i32)> =
+            self.chunks.iter().copied().filter(|&(cx, cy)| (cx - px).abs().max((cy - py).abs()) > FORGET_RADIUS).collect();
+        for chunk in far {
+            self.chunks.remove(&chunk);
+            // Sleeping enemies there vanish (not kills); awake ones keep chasing you.
+            for e in &mut self.enemies {
+                if e.alive && !e.awake && Self::chunk_of(e.pos) == chunk {
+                    e.alive = false;
+                }
+            }
+            self.shrines.retain(|s| s.chunk != chunk);
+        }
+    }
+
+    /// Packs and shrines for one chunk. The same seed and chunk always give the
+    /// same content, so a chunk you return to is rebuilt identically.
+    fn generate_chunk(&mut self, cx: i32, cy: i32) {
+        let key = (cx as i64 as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ (cy as i64 as u64).wrapping_mul(0xC2B2_AE3D_27D4_EB4F);
+        let mut rng = Rng::new(self.seed ^ key);
+        let origin = V2::new(cx as f32 * CHUNK, cy as f32 * CHUNK);
+        let packs = rng.range_usize(7, 11);
+        for _ in 0..packs {
+            let center = origin + V2::new(rng.range(80.0, CHUNK - 80.0), rng.range(80.0, CHUNK - 80.0));
+            if center.dist(self.start) < 600.0 {
+                continue;
+            }
+            let count = rng.range_usize(8, 16);
             let spread = 30.0 + count as f32 * 6.0;
             for _ in 0..count {
-                let roll = self.rng.f32();
+                let roll = rng.f32();
                 let kind = if roll < 0.1 {
                     EnemyKind::Caster
                 } else if roll < 0.32 {
@@ -694,12 +787,97 @@ impl World {
                 } else {
                     EnemyKind::Grunt
                 };
-                let offset = V2::from_angle(self.rng.range(0.0, TAU)) * self.rng.range(0.0, spread);
-                self.spawn(kind, clamp_to_map(center + offset, 20.0), false);
+                let offset = V2::from_angle(rng.range(0.0, TAU)) * rng.range(0.0, spread);
+                self.spawn(kind, center + offset, false);
             }
-            if self.rng.chance(0.3) {
+            if rng.chance(0.3) {
                 self.spawn(EnemyKind::Brute, center, false);
             }
+        }
+        if rng.chance(0.6) {
+            let pos = origin + V2::new(rng.range(150.0, CHUNK - 150.0), rng.range(150.0, CHUNK - 150.0));
+            let kind = if rng.chance(0.12) {
+                ShrineKind::Ancient
+            } else {
+                [ShrineKind::Fury, ShrineKind::Swiftness, ShrineKind::Haste, ShrineKind::Warding, ShrineKind::Vitality]
+                    [rng.range_usize(0, 4)]
+            };
+            if pos.dist(self.start) > 250.0 {
+                self.shrines.push(Shrine { id: self.next_shrine, pos, kind, chunk: (cx, cy) });
+                self.next_shrine += 1;
+            }
+        }
+    }
+
+    /// Drops dead enemies once they pile up, remapping every stored index.
+    fn compact(&mut self) {
+        let dead = self.enemies.iter().filter(|e| !e.alive).count();
+        if dead < 3000 || dead * 2 < self.enemies.len() {
+            return;
+        }
+        let mut remap = vec![usize::MAX; self.enemies.len()];
+        let mut next = 0;
+        for (i, e) in self.enemies.iter().enumerate() {
+            if e.alive {
+                remap[i] = next;
+                next += 1;
+            }
+        }
+        self.enemies.retain(|e| e.alive);
+        if let Some(boss) = &mut self.boss {
+            // A dead boss ends the map, so its index only matters while it lives.
+            boss.index = remap[boss.index].min(self.enemies.len().saturating_sub(1));
+        }
+        for p in &mut self.projectiles {
+            p.target = p.target.and_then(|(i, id)| (remap[i] != usize::MAX).then_some((remap[i], id)));
+        }
+        self.events.push(Event::Compacted);
+        self.rebuild_grid();
+    }
+
+    /// Walking onto a shrine claims it.
+    fn claim_shrines(&mut self) {
+        let p = self.player.pos;
+        let claimed: Vec<Shrine> = self
+            .shrines
+            .iter()
+            .filter(|s| s.pos.dist(p) < SHRINE_RADIUS + PLAYER_RADIUS)
+            .cloned()
+            .collect();
+        if claimed.is_empty() {
+            return;
+        }
+        self.shrines.retain(|s| s.pos.dist(p) >= SHRINE_RADIUS + PLAYER_RADIUS);
+        for shrine in claimed {
+            let key = (usize::MAX, shrine.id as usize);
+            let key2 = (usize::MAX - 1, shrine.id as usize);
+            match shrine.kind {
+                ShrineKind::Fury => self.set_timed(key, TimedKind::Buff { stat: Stat::DamagePct, amount: 20.0 }, SHRINE_DURATION),
+                ShrineKind::Swiftness => {
+                    self.set_timed(key, TimedKind::Buff { stat: Stat::MoveSpeedPct, amount: 15.0 }, SHRINE_DURATION)
+                }
+                ShrineKind::Haste => self.set_timed(key, TimedKind::Buff { stat: Stat::CooldownPct, amount: 20.0 }, SHRINE_DURATION),
+                ShrineKind::Warding => {
+                    self.gain_barrier(60.0);
+                    self.set_timed(key, TimedKind::Buff { stat: Stat::Armor, amount: 15.0 }, SHRINE_DURATION);
+                    self.set_timed(key2, TimedKind::Buff { stat: Stat::Mr, amount: 15.0 }, SHRINE_DURATION);
+                }
+                ShrineKind::Vitality => {
+                    let amount = self.max_hp() * 0.3;
+                    self.heal(amount);
+                    self.events.push(Event::Heal);
+                }
+                ShrineKind::Ancient => self.set_timed(key, TimedKind::Buff { stat: Stat::DamagePct, amount: 10.0 }, f32::INFINITY),
+            }
+            let duration = match shrine.kind {
+                ShrineKind::Vitality => 0.0,
+                ShrineKind::Ancient => f32::INFINITY,
+                _ => SHRINE_DURATION,
+            };
+            if duration > 0.0 {
+                self.shrine_buffs.push((shrine.kind, duration));
+            }
+            self.events.push(Event::ShrineClaimed { pos: shrine.pos, kind: shrine.kind });
         }
     }
 
@@ -712,7 +890,12 @@ impl World {
             Stat::Armor => BASE_ARMOR + self.mods.armor,
             Stat::Mr => BASE_MR + self.mods.mr,
             Stat::MaxHp => BASE_HP + self.mods.max_hp,
-            Stat::DamagePct | Stat::DamageReduction | Stat::HealingPct | Stat::HealToBarrier => 0.0,
+            Stat::DamagePct
+            | Stat::DamageReduction
+            | Stat::HealingPct
+            | Stat::HealToBarrier
+            | Stat::MoveSpeedPct
+            | Stat::CooldownPct => 0.0,
         } + grow_index(stat).map_or(0.0, |i| self.growth[i]);
         let buffs: f32 = self
             .timed
@@ -787,7 +970,7 @@ impl World {
     }
 
     pub fn cooldown_rate(&self) -> f32 {
-        (1.0 + MOMENTUM_RATE * self.momentum as f32) * self.mods.cooldown_rate
+        (1.0 + MOMENTUM_RATE * self.momentum as f32) * self.mods.cooldown_rate * (1.0 + self.stat(Stat::CooldownPct) / 100.0)
     }
 
     pub fn momentum_left(&self) -> f32 {
@@ -876,7 +1059,17 @@ impl World {
             return;
         }
         self.time += DT;
+        self.compact();
         self.update_player(input);
+        // No new packs during the boss fight: the arena stays what you left.
+        if self.phase == Phase::Clearing {
+            self.ensure_chunks();
+        }
+        self.claim_shrines();
+        for (_, left) in &mut self.shrine_buffs {
+            *left -= DT;
+        }
+        self.shrine_buffs.retain(|(_, left)| *left > 0.0);
         self.update_timed();
         self.move_enemies();
         self.rebuild_grid();
@@ -911,6 +1104,7 @@ impl World {
 
     fn update_player(&mut self, input: &Input) {
         let max_hp = self.max_hp();
+        let speed_mult = 1.0 + self.stat(Stat::MoveSpeedPct) / 100.0;
         let p = &mut self.player;
         p.dash_cooldown = (p.dash_cooldown - DT).max(0.0);
         p.invulnerable = (p.invulnerable - DT).max(0.0);
@@ -930,9 +1124,8 @@ impl World {
             p.pos += p.dash_dir * (DASH_DISTANCE / DASH_TIME * DT);
             p.dash_time -= DT;
         } else {
-            p.pos += dir * (p.speed * DT);
+            p.pos += dir * (p.speed * speed_mult * DT);
         }
-        p.pos = clamp_to_map(p.pos, PLAYER_RADIUS);
         p.hp = (p.hp + 3.0 * DT).min(max_hp);
     }
 
@@ -1095,7 +1288,7 @@ impl World {
         }
         for &(i, step) in &moves {
             let e = &mut self.enemies[i];
-            e.pos = clamp_to_map(e.pos + step, e.radius);
+            e.pos += step;
             if step.len_sq() > 1e-3 {
                 e.heading = step.norm();
             }
@@ -1195,7 +1388,7 @@ impl World {
                 shot.life = 0.0;
             }
         }
-        self.enemy_shots.retain(|s| s.life > 0.0 && inside_map(s.pos));
+        self.enemy_shots.retain(|s| s.life > 0.0);
         if hurt > 0.0 {
             self.hurt_player(hurt, true);
         }
@@ -1929,7 +2122,7 @@ impl World {
                     p.pierce -= 1;
                 }
             }
-            if p.range_left <= 0.0 || !inside_map(p.pos) {
+            if p.range_left <= 0.0 {
                 p.alive = false;
             }
             if !p.alive {
@@ -2118,7 +2311,7 @@ impl World {
                 // covers the top and bottom edges.
                 let raw = V2::from_angle(self.rng.range(0.0, TAU));
                 let dir = V2::new(raw.x, raw.y * 0.5).norm();
-                let pos = clamp_to_map(self.player.pos + dir * 320.0, 120.0);
+                let pos = self.player.pos + dir * 320.0;
                 self.phase = Phase::BossIncoming { timer: BOSS_WARNING, pos };
             }
             Phase::BossIncoming { timer, pos } => {
@@ -2171,7 +2364,7 @@ impl World {
                 self.telegraphs.push(circle(target));
                 for _ in 0..2 {
                     let offset = V2::from_angle(self.rng.range(0.0, TAU)) * self.rng.range(120.0, 220.0);
-                    self.telegraphs.push(circle(clamp_to_map(target + offset, 90.0)));
+                    self.telegraphs.push(circle(target + offset));
                 }
             }
             if low && !boss.phase_two {
@@ -2189,7 +2382,7 @@ impl World {
                     boss.add_timer = 4.0;
                     boss.add_waves_left -= 1;
                     for k in 0..10 {
-                        let pos = clamp_to_map(boss_pos + V2::from_angle(k as f32 * TAU / 10.0) * 140.0, 20.0);
+                        let pos = boss_pos + V2::from_angle(k as f32 * TAU / 10.0) * 140.0;
                         self.spawn(EnemyKind::Add, pos, true);
                     }
                 }
@@ -2237,13 +2430,6 @@ fn area_mult(support: Option<SupportKind>) -> f32 {
     }
 }
 
-fn clamp_to_map(pos: V2, radius: f32) -> V2 {
-    V2::new(pos.x.clamp(radius, MAP_W - radius), pos.y.clamp(radius, MAP_H - radius))
-}
-
-fn inside_map(pos: V2) -> bool {
-    pos.x >= 0.0 && pos.y >= 0.0 && pos.x <= MAP_W && pos.y <= MAP_H
-}
 
 /// A simple autopilot: dodge telegraphs and orbs, keep some distance from what
 /// is close, otherwise walk to the nearest enemy. Used for benchmarks and demos.
@@ -2263,6 +2449,29 @@ pub fn autopilot(world: &World) -> Input {
             let side = V2::new(-s.vel.y, s.vel.x).norm();
             let dir = if side.dot(to_player) >= 0.0 { side } else { -side };
             return Input { move_dir: dir, dash: false };
+        }
+    }
+    // During the boss fight, stay at casting distance from the boss.
+    if let Some(boss) = world.boss.as_ref().filter(|b| world.enemies.get(b.index).is_some_and(|e| e.alive)) {
+        let to_boss = world.enemies[boss.index].pos - p;
+        let d = to_boss.len();
+        let close_add = world.enemies.iter().any(|e| e.alive && e.awake && e.kind != EnemyKind::Boss && e.pos.dist_sq(p) < 70.0 * 70.0);
+        if !close_add {
+            let dir = if d > 420.0 {
+                to_boss.norm()
+            } else if d < 300.0 {
+                (-to_boss).norm().rotate(0.6)
+            } else {
+                to_boss.norm().rotate(1.5)
+            };
+            return Input { move_dir: dir, dash: false };
+        }
+    }
+    // Detour to a close shrine when nothing is in your face.
+    let close_enemy = world.enemies.iter().any(|e| e.alive && e.awake && e.pos.dist_sq(p) < 90.0 * 90.0);
+    if !close_enemy {
+        if let Some(shrine) = world.shrines.iter().filter(|s| s.pos.dist(p) < 700.0).min_by(|a, b| a.pos.dist(p).total_cmp(&b.pos.dist(p))) {
+            return Input { move_dir: (shrine.pos - p).norm(), dash: false };
         }
     }
     let mut nearest: Option<(f32, V2)> = None;
@@ -2506,6 +2715,59 @@ mod tests {
         world.cast(0);
         let paid = hp - world.player.hp;
         assert!((world.player.barrier - paid * 2.5).abs() < 1e-3);
+    }
+
+    #[test]
+    fn the_map_never_ends() {
+        let mut world = World::new(preset("Starter"), 2, 0);
+        // Walk straight up for a long way: new packs keep appearing ahead.
+        for _ in 0..(120.0 / DT) as usize {
+            world.step(&Input { move_dir: V2::new(0.0, -1.0), dash: false });
+            world.events.clear();
+            world.player.hp = world.max_hp();
+        }
+        let p = world.player.pos;
+        assert!(p.y < -20_000.0, "player at {p:?}");
+        let near = world.enemies.iter().filter(|e| e.alive && e.pos.dist(p) < 2.0 * CHUNK).count();
+        assert!(near > 50, "only {near} enemies near the player");
+        // Chunks far behind were forgotten, so memory stays bounded.
+        assert!(world.chunks.len() <= ((2 * FORGET_RADIUS + 1) * (2 * FORGET_RADIUS + 1)) as usize);
+    }
+
+    #[test]
+    fn chunks_are_deterministic() {
+        let a = World::new(preset("Starter"), 11, 0);
+        let b = World::new(preset("Starter"), 11, 0);
+        let pos = |w: &World| w.shrines.iter().map(|s| (s.pos.x, s.pos.y)).collect::<Vec<_>>();
+        assert_eq!(pos(&a), pos(&b));
+    }
+
+    #[test]
+    fn shrines_grant_their_modifier() {
+        let mut world = World::new(Build::empty(), 1, 0);
+        world.shrines.clear();
+        let pos = world.player.pos + V2::new(10.0, 0.0);
+        world.shrines.push(Shrine { id: 999, pos, kind: ShrineKind::Fury, chunk: (0, 0) });
+        world.claim_shrines();
+        assert_eq!(world.stat(Stat::DamagePct), 20.0);
+        assert!(world.shrines.is_empty());
+        world.shrines.push(Shrine { id: 1000, pos, kind: ShrineKind::Swiftness, chunk: (0, 0) });
+        world.claim_shrines();
+        assert_eq!(world.stat(Stat::MoveSpeedPct), 15.0);
+        assert_eq!(world.shrine_buffs.len(), 2);
+    }
+
+    #[test]
+    fn ancient_shrines_last_through_the_boss_and_stack() {
+        let mut world = World::new(Build::empty(), 1, 0);
+        for id in 0..2 {
+            world.shrines.push(Shrine { id: 500 + id, pos: world.player.pos, kind: ShrineKind::Ancient, chunk: (0, 0) });
+        }
+        world.claim_shrines();
+        for _ in 0..(120.0 / DT) as usize {
+            world.update_timed();
+        }
+        assert_eq!(world.stat(Stat::DamagePct), 20.0);
     }
 
     #[test]

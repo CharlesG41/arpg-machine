@@ -1,7 +1,7 @@
 //! Planning screens: the skill tree, and the loadout where spells, supports and
 //! artifacts are dragged into place.
 use crate::render::family_color;
-use crate::ui::{Ui, ACCENT, BORDER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
+use crate::ui::{Tooltip, Ui, ACCENT, BORDER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
 use arpg_machine::content::{presets, ArtifactKind, Build, Family, SpellId, SupportKind};
 use arpg_machine::math::V2;
 use arpg_machine::tree::{SkillTree, ORIGIN};
@@ -256,12 +256,11 @@ impl Planner {
     }
 
     fn tree_screen(&mut self, ui: &Ui) {
-        let (w, h) = (screen_width(), screen_height());
         if !self.fitted {
             self.fit();
         }
         let canvas = self.canvas();
-        let mouse: Vec2 = mouse_position().into();
+        let mouse: Vec2 = crate::ui::mouse();
         let panel = Rect::new(16.0, HEADER + 14.0, 320.0, 214.0);
         let over_panel = panel.contains(mouse);
         let in_canvas = canvas.contains(mouse) && !over_panel;
@@ -371,28 +370,6 @@ impl Planner {
             }
         }
 
-        // Hover label.
-        if let Some(id) = hovered {
-            let label = if self.tree.acquired[id] {
-                if id == ORIGIN {
-                    "Origin".to_string()
-                } else {
-                    "Owned — right click to refund (free)".to_string()
-                }
-            } else if affordable {
-                format!("Click: buy route, {} point{}", route.len(), if route.len() > 1 { "s" } else { "" })
-            } else {
-                format!("Needs {} points, {} left", route.len(), self.tree.remaining())
-            };
-            let tw = ui.width(&label, 18);
-            let (lx, ly) = ((mouse.x + 18.0).min(w - tw - 24.0), mouse.y - 14.0);
-            draw_rectangle(lx - 8.0, ly - 20.0, tw + 16.0, 28.0, Color::new(0.03, 0.035, 0.05, 0.95));
-            ui.text(&label, lx, ly, 18, if affordable || self.tree.acquired[id] { TEXT } else { DANGER });
-            if let Some(spell) = self.tree.nodes[id].spell {
-                spell_details(ui, spell, Rect::new(16.0, h - 128.0, 560.0, 112.0));
-            }
-        }
-
         // Points panel (stands in for character levels: 1 point per level).
         draw_rectangle(panel.x, panel.y, panel.w, panel.h, PANEL);
         draw_rectangle_lines(panel.x, panel.y, panel.w, panel.h, 1.0, BORDER);
@@ -421,6 +398,35 @@ impl Planner {
         ui.text(&format!("Tree seed {}", self.tree.seed), panel.x + 16.0, panel.y + 172.0, 15, MUTED);
         ui.text("Left click: buy · Right click: refund", panel.x + 16.0, panel.y + 190.0, 15, MUTED);
         ui.text("Drag: move · Wheel: zoom", panel.x + 16.0, panel.y + 206.0, 15, MUTED);
+
+        // Tooltip for the hovered node, with what a click would do.
+        if let Some(id) = hovered.filter(|_| self.pan_drag.is_none_or(|(_, _, moved)| !moved)) {
+            let footer = if self.tree.acquired[id] {
+                if id == ORIGIN {
+                    ("Every route starts here.".to_string(), MUTED)
+                } else if self.tree.nodes[id].spell.is_some_and(|s| self.build.contains(s)) {
+                    ("Owned and on your bar. Right click to refund (free).".to_string(), GOOD)
+                } else {
+                    ("Owned. Right click to refund (free).".to_string(), GOOD)
+                }
+            } else if affordable {
+                let n = route.len();
+                let plural = if n > 1 { "s" } else { "" };
+                (format!("Click to learn: the route costs {n} point{plural} ({} left).", self.tree.remaining()), TEXT)
+            } else {
+                (format!("Needs {} points, only {} left.", route.len(), self.tree.remaining()), DANGER)
+            };
+            match self.tree.nodes[id].spell {
+                Some(spell) => ui.tooltip(&Tooltip { footer: Some(footer), ..spell_tip(spell) }),
+                None => ui.tooltip(&Tooltip {
+                    title: "Origin".to_string(),
+                    color: ACCENT,
+                    subtitle: "Start of your tree".to_string(),
+                    body: "Spend skill points to learn the spells along a route. Each node costs 1 point.".to_string(),
+                    footer: Some(footer),
+                }),
+            }
+        }
     }
 
     fn buy(&mut self, id: usize) {
@@ -614,7 +620,7 @@ impl Planner {
     }
 
     fn loadout_screen(&mut self, ui: &Ui) {
-        let mouse: Vec2 = mouse_position().into();
+        let mouse: Vec2 = crate::ui::mouse();
         // Family filter: click a color to show only that family, again to show all.
         for (i, family) in FAMILIES.into_iter().enumerate() {
             let r = Self::filter_rect(i);
@@ -663,7 +669,7 @@ impl Planner {
             self.list_scroll -= wheel.signum() * 60.0;
         }
         self.list_scroll = self.list_scroll.clamp(0.0, max_scroll);
-        let hovered = dragging.map(|d| d.0).or_else(|| self.pick(mouse).map(|p| p.0));
+        let hovered = if dragging.is_none() { self.pick(mouse) } else { None };
 
         // Spell collection.
         let title = if self.sandbox { format!("All spells ({})", available.len()) } else { format!("Your spells ({})", available.len()) };
@@ -765,22 +771,15 @@ impl Planner {
             }
         }
 
-        // Details of what is hovered or dragged.
+        // How the screen works; each card explains itself on hover.
         let details = Rect::new(BAR_X, ART_Y + ART_H + 40.0, 540.0, 150.0);
-        match hovered {
-            Some(Item::Spell(s)) => spell_details(ui, s, details),
-            Some(Item::Support(s)) => item_details(ui, s.name(), "Support · once per build", s.description(), details),
-            Some(Item::Artifact(a)) => {
-                item_details(ui, a.name(), &format!("Artifact · size {}", a.size()), a.description(), details)
-            }
-            None => item_details(
-                ui,
-                "Drag and drop",
-                "Spells go on the spell bar, supports in a spell's socket, artifacts on the artifact bar.",
-                "Click a spell or artifact to add it at the end. Drag a card off its bar to remove it. Drag cards along a bar to reorder them.",
-                details,
-            ),
-        }
+        item_details(
+            ui,
+            "Drag and drop",
+            "Spells go on the spell bar, supports in a spell's socket, artifacts on the artifact bar.",
+            "Hover any card to read it. Click a spell or artifact to add it at the end. Drag a card off its bar to remove it, or along it to reorder.",
+            details,
+        );
 
         // Sandbox and ready-made builds.
         let py = details.bottom() + 30.0;
@@ -839,6 +838,90 @@ impl Planner {
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 2.0, color);
             ui.text(name, r.x + 12.0, r.y + 28.0, 17, TEXT);
         }
+
+        if let Some((item, source)) = hovered {
+            ui.tooltip(&self.item_tip(item, source));
+        }
+    }
+
+    /// Tooltip for a loadout card, with what you can do with it from where it is.
+    fn item_tip(&self, item: Item, source: Source) -> Tooltip {
+        match item {
+            Item::Spell(spell) => {
+                let footer = match source {
+                    Source::Bar => {
+                        let support = self.build.slots.iter().find(|s| s.spell == spell).and_then(|s| s.support);
+                        let socket = support
+                            .map_or("No support yet: drag one onto its socket.".to_string(), |s| format!("Support: {}.", s.name()));
+                        (format!("{socket} Drag along the bar to reorder, or off it to remove."), GOOD)
+                    }
+                    _ if self.build.contains(spell) => ("Already on your bar.".to_string(), GOOD),
+                    _ if self.build.used() + spell.size() > self.build.capacity => (
+                        format!("Needs {} free slot(s); the bar has {}.", spell.size(), self.build.capacity - self.build.used()),
+                        DANGER,
+                    ),
+                    _ => ("Click to add it at the end, or drag it onto the bar.".to_string(), TEXT),
+                };
+                Tooltip { footer: Some(footer), ..spell_tip(spell) }
+            }
+            Item::Support(support) => {
+                let used_on = self.build.slots.iter().find(|s| s.support == Some(support)).map(|s| s.spell);
+                let footer = match (source, used_on) {
+                    (Source::Socket, _) => ("Drag it to another socket, or off the bar to remove it.".to_string(), GOOD),
+                    (_, Some(spell)) => (format!("On {}. Dragging it elsewhere moves it.", spell.name()), GOOD),
+                    _ => {
+                        let fits: Vec<&str> =
+                            self.build.slots.iter().filter(|s| support.fits(s.spell)).map(|s| s.spell.name()).collect();
+                        if fits.is_empty() {
+                            ("No spell on your bar can take it.".to_string(), DANGER)
+                        } else {
+                            (format!("Fits on your bar: {}.", fits.join(", ")), TEXT)
+                        }
+                    }
+                };
+                Tooltip {
+                    title: support.name().to_string(),
+                    color: ACCENT,
+                    subtitle: "Support · once per build".to_string(),
+                    body: support.description().to_string(),
+                    footer: Some(footer),
+                }
+            }
+            Item::Artifact(artifact) => {
+                let footer = match source {
+                    Source::ArtifactBar => ("Equipped. Drag along the bar to reorder, or off it to remove.".to_string(), GOOD),
+                    _ if self.build.has_artifact(artifact) => ("Equipped.".to_string(), GOOD),
+                    _ if self.build.artifacts_used() + artifact.size() > self.build.artifact_capacity => (
+                        format!(
+                            "Needs {} capacity; {} free.",
+                            artifact.size(),
+                            self.build.artifact_capacity - self.build.artifacts_used()
+                        ),
+                        DANGER,
+                    ),
+                    _ => ("Click to equip, or drag it onto the artifact bar.".to_string(), TEXT),
+                };
+                Tooltip {
+                    title: artifact.name().to_string(),
+                    color: Color::new(0.85, 0.65, 0.35, 1.0),
+                    subtitle: format!("Artifact · size {}", artifact.size()),
+                    body: artifact.description().to_string(),
+                    footer: Some(footer),
+                }
+            }
+        }
+    }
+}
+
+/// The facts and description of a spell.
+fn spell_tip(spell: SpellId) -> Tooltip {
+    let cooldown = if spell.casts() { format!("{:.2} s cooldown", spell.cooldown()) } else { "always on".to_string() };
+    Tooltip {
+        title: spell.name().to_string(),
+        color: family_color(spell.family()),
+        subtitle: format!("{} · {} · size {} · {}", spell.family().name(), spell.delivery().name(), spell.size(), cooldown),
+        body: spell.description(),
+        footer: None,
     }
 }
 
@@ -848,10 +931,4 @@ fn item_details(ui: &Ui, title: &str, kind: &str, description: &str, r: Rect) {
     ui.text(title, r.x + 16.0, r.y + 32.0, 22, TEXT);
     ui.text(kind, r.x + 16.0, r.y + 56.0, 15, ACCENT);
     ui.wrapped(description, r.x + 16.0, r.y + 84.0, r.w - 32.0, 16, MUTED);
-}
-
-fn spell_details(ui: &Ui, spell: SpellId, r: Rect) {
-    let cooldown = if spell.casts() { format!("{:.2} s cooldown", spell.cooldown()) } else { "always on".to_string() };
-    let kind = format!("{} · {} · size {} · {}", spell.family().name(), spell.delivery().name(), spell.size(), cooldown);
-    item_details(ui, spell.name(), &kind, &spell.description(), r);
 }

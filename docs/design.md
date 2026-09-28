@@ -508,6 +508,12 @@ Exemple de boss qui combine les deux familles :
 > adds pour recharger son momentum.
 
 À explorer :
+- **Map infinie** (décidé) : on peut aller dans n'importe quelle direction
+  aussi longtemps qu'on veut. Le boss apparaît quand la barre est pleine.
+- **Sanctuaires** (décidé) : des modificateurs à ramasser pendant la map
+  (+20 % de dégâts ou +15 % de vitesse pendant 30 s, etc.). Les rares
+  (Ancient) durent jusqu'à la fin de la map, boss compris. Ils donnent une
+  raison de bouger et de choisir un chemin.
 - **Modificateurs de map** (plus tard) dans l'esprit des Boss Contracts :
   risque visible et opt-in, contre plus de loot. Avec le choix parmi 3 maps,
   les modificateurs sont visibles avant d'entrer. Les 20 Boss Contracts de

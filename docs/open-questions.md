@@ -49,6 +49,8 @@
 - **Zone + barre de progression** (Greater Rift) : les kills remplissent la
   barre, et à 100 % le boss apparaît. 3 à 5 minutes par map.
 - **Pas de campagne.** Les maps commencent dès le niveau 1.
+- **Map infinie**, générée autour de toi, avec des **sanctuaires** à
+  ramasser (buffs de 30 s, ou jusqu'à la fin de la map pour les rares).
 - **Choix parmi 3 maps** après chaque map, avec modificateurs et boss visibles.
 - **Tiers infinis après le niveau 50**, avec un classement par seed.
 - **Sorts adaptés du catalogue de God Tower** (250 sorts, 15 familles), avec

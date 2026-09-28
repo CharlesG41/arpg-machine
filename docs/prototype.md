@@ -65,8 +65,16 @@ cargo run --release --example catalogue
   Plate +25 PR, Spirit Veil +25 MR).
 - **Mode sandbox** : tous les sorts, sans l'arbre. Les 4 builds prêts (Starter,
   Plague, Inferno, Steel) l'activent.
-- **Une map** de 4200 × 4200 avec environ 110 packs. Les kills remplissent
-  une barre de 500 points. À 100 %, le boss apparaît.
+- **Une map infinie**, générée par chunks de 1200 × 1200 autour de toi (7 à 11
+  packs par chunk), dans n'importe quelle direction. Les chunks loin derrière
+  sont oubliés. Les kills remplissent une barre de 500 points ; à 100 %, le
+  boss apparaît (et plus aucun nouveau pack pendant le combat).
+- **Sanctuaires** (environ 1 par chunk sur 2) : marcher dessus donne un
+  modificateur. Fury +20 % de dégâts, Swiftness +15 % de vitesse, Haste +20 %
+  de vitesse de cooldown, Warding 60 Barrier et +15 PR/MR (30 s chacun),
+  Vitality soigne 30 %. **Ancient** (rare, doré) : +10 % de dégâts jusqu'à
+  la fin de la map, boss compris, et ça s'additionne. Des flèches sur le bord
+  de l'écran pointent vers les sanctuaires hors de vue.
 - **Ennemis** (des formes géométriques), avec leurs résistances (PR / MR) :
   - carré (Grunt), 0 / 0 : fonce sur toi ;
   - triangle (Runner), 0 / 0 : rapide et fragile ;

@@ -3,7 +3,7 @@
 use arpg_machine::content::Family;
 use arpg_machine::math::V2;
 use arpg_machine::rng::Rng;
-use arpg_machine::world::{EnemyKind, Event, Phase, World, MAP_H, MAP_W, PLAYER_RADIUS};
+use arpg_machine::world::{EnemyKind, Event, Phase, ShrineKind, World, PLAYER_RADIUS};
 use macroquad::prelude::*;
 
 const MAX_PARTICLES: usize = 6000;
@@ -43,6 +43,17 @@ fn enemy_color(kind: EnemyKind) -> Color {
         EnemyKind::Brute => Color::new(0.6, 0.32, 0.9, 1.0),
         EnemyKind::Boss => Color::new(0.95, 0.38, 0.18, 1.0),
         EnemyKind::Add => Color::new(0.64, 0.36, 0.38, 1.0),
+    }
+}
+
+pub fn shrine_color(kind: ShrineKind) -> Color {
+    match kind {
+        ShrineKind::Fury => Color::new(1.0, 0.35, 0.3, 1.0),
+        ShrineKind::Swiftness => Color::new(0.4, 1.0, 0.7, 1.0),
+        ShrineKind::Haste => Color::new(0.4, 0.75, 1.0, 1.0),
+        ShrineKind::Warding => Color::new(0.8, 0.85, 1.0, 1.0),
+        ShrineKind::Vitality => Color::new(0.45, 1.0, 0.45, 1.0),
+        ShrineKind::Ancient => Color::new(1.0, 0.82, 0.3, 1.0),
     }
 }
 
@@ -102,6 +113,8 @@ pub struct Fx {
     pub boss_phase_banner: f32,
     barrier_flash: f32,
     heal_flash: f32,
+    /// Name of the shrine just claimed, and how long to show it.
+    pub shrine_banner: Option<(ShrineKind, f32)>,
     rng: Rng,
     time: f32,
 }
@@ -118,6 +131,7 @@ impl Fx {
             boss_phase_banner: 0.0,
             barrier_flash: 0.0,
             heal_flash: 0.0,
+            shrine_banner: None,
             rng: Rng::new(0xF00D),
             time: 0.0,
         }
@@ -252,6 +266,14 @@ impl Fx {
                     }
                 }
                 Event::BarrierHit => self.barrier_flash = 0.15,
+                Event::Compacted => self.flash.iter_mut().for_each(|f| *f = 0.0),
+                Event::ShrineClaimed { pos, kind } => {
+                    let pos = v(*pos);
+                    let color = shrine_color(*kind);
+                    self.transient(Shape::Ring { pos, from: 20.0, to: 220.0, color, width: 6.0 }, 0.5);
+                    self.burst(pos, 50, 420.0, 4.5, 0.8, color);
+                    self.shrine_banner = Some((*kind, 2.2));
+                }
                 Event::Heal => self.heal_flash = 0.3,
                 Event::SelfCast { family } => {
                     let pos = v(world.player.pos);
@@ -331,6 +353,12 @@ impl Fx {
         self.boss_phase_banner = (self.boss_phase_banner - dt).max(0.0);
         self.barrier_flash = (self.barrier_flash - dt).max(0.0);
         self.heal_flash = (self.heal_flash - dt).max(0.0);
+        if let Some((_, left)) = &mut self.shrine_banner {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.shrine_banner = None;
+            }
+        }
     }
 
     pub fn camera(&mut self, world: &World) -> Camera2D {
@@ -362,24 +390,35 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
     let view = Rect::new(center.x - VIEW_WIDTH / 2.0 - 80.0, center.y - view_h / 2.0 - 80.0, VIEW_WIDTH + 160.0, view_h + 160.0);
     let t = fx.time;
 
-    // Floor and a faint grid, so movement reads even in an empty area.
-    draw_rectangle(0.0, 0.0, MAP_W, MAP_H, FLOOR);
+    // Floor and a faint grid, so movement reads on the endless map.
+    draw_rectangle(view.x, view.y, view.w, view.h, FLOOR);
     let step = 160.0;
     let mut x = (view.x / step).floor() * step;
     while x < view.right() {
-        if (0.0..=MAP_W).contains(&x) {
-            draw_line(x, view.y.max(0.0), x, view.bottom().min(MAP_H), 1.0, GRID_LINE);
-        }
+        draw_line(x, view.y, x, view.bottom(), 1.0, GRID_LINE);
         x += step;
     }
     let mut y = (view.y / step).floor() * step;
     while y < view.bottom() {
-        if (0.0..=MAP_H).contains(&y) {
-            draw_line(view.x.max(0.0), y, view.right().min(MAP_W), y, 1.0, GRID_LINE);
-        }
+        draw_line(view.x, y, view.right(), y, 1.0, GRID_LINE);
         y += step;
     }
-    draw_rectangle_lines(0.0, 0.0, MAP_W, MAP_H, 6.0, Color::new(0.3, 0.2, 0.35, 1.0));
+
+    // Shrines.
+    for shrine in &world.shrines {
+        let p = v(shrine.pos);
+        if !view.contains(p) {
+            continue;
+        }
+        let c = shrine_color(shrine.kind);
+        let pulse = 0.5 + 0.5 * (t * 3.0 + shrine.id as f32).sin();
+        draw_circle(p.x, p.y, 46.0 + 6.0 * pulse, with_alpha(c, 0.12));
+        draw_circle_lines(p.x, p.y, 40.0, 2.0, with_alpha(c, 0.5 + 0.4 * pulse));
+        draw_poly(p.x, p.y, 4, 18.0, 45.0 + t * 40.0, c);
+        draw_poly_lines(p.x, p.y, 4, 24.0, 45.0 - t * 30.0, 2.0, with_alpha(WHITE, 0.6));
+        let beam = 60.0 + 20.0 * pulse;
+        draw_rectangle(p.x - 3.0, p.y - beam, 6.0, beam - 20.0, with_alpha(c, 0.35));
+    }
 
     // Ground layer.
     for zone in &world.zones {

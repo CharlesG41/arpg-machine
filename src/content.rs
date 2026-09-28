@@ -384,6 +384,10 @@ pub enum Stat {
     /// Heals also grant this percent of the healing as Barrier.
     HealToBarrier,
     MaxHp,
+    /// Percent more movement speed.
+    MoveSpeedPct,
+    /// Percent more cooldown rate.
+    CooldownPct,
 }
 
 impl Stat {
@@ -398,6 +402,8 @@ impl Stat {
             Stat::HealingPct => "% healing received",
             Stat::HealToBarrier => "% of healing as Barrier",
             Stat::MaxHp => "max Health",
+            Stat::MoveSpeedPct => "% movement speed",
+            Stat::CooldownPct => "% cooldown rate",
         }
     }
 }

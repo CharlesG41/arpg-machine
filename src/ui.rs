@@ -1,6 +1,6 @@
 //! Shared interface helpers, the in-map HUD and the result panel.
-use crate::render::family_color;
-use arpg_machine::world::{Phase, World, MOMENTUM_MAX, PROGRESS_NEEDED};
+use crate::render::{family_color, shrine_color, VIEW_WIDTH};
+use arpg_machine::world::{Phase, ShrineKind, World, MOMENTUM_MAX, PROGRESS_NEEDED};
 use macroquad::prelude::*;
 
 pub const PANEL: Color = Color::new(0.08, 0.09, 0.12, 0.94);
@@ -11,6 +11,17 @@ pub const MUTED: Color = Color::new(0.55, 0.58, 0.66, 1.0);
 pub const ACCENT: Color = Color::new(1.0, 0.78, 0.3, 1.0);
 pub const DANGER: Color = Color::new(0.95, 0.3, 0.3, 1.0);
 pub const GOOD: Color = Color::new(0.45, 0.9, 0.55, 1.0);
+
+/// The cursor, or `ARPG_MOUSE=x,y` when set (screenshots cannot move the real mouse).
+pub fn mouse() -> Vec2 {
+    static FORCED: std::sync::OnceLock<Option<Vec2>> = std::sync::OnceLock::new();
+    let forced = FORCED.get_or_init(|| {
+        let raw = std::env::var("ARPG_MOUSE").ok()?;
+        let (x, y) = raw.split_once(',')?;
+        Some(vec2(x.trim().parse().ok()?, y.trim().parse().ok()?))
+    });
+    forced.unwrap_or_else(|| mouse_position().into())
+}
 
 pub struct Ui {
     pub font: Font,
@@ -35,28 +46,81 @@ impl Ui {
         self.text(s, cx - self.width(s, size) / 2.0, y, size, color);
     }
 
-    /// Word-wrapped text; returns the y after the last line.
-    pub fn wrapped(&self, s: &str, x: f32, mut y: f32, max_w: f32, size: u16, color: Color) -> f32 {
+    /// Splits text into lines that fit `max_w`.
+    pub fn wrap_lines(&self, s: &str, max_w: f32, size: u16) -> Vec<String> {
+        let mut lines = Vec::new();
         let mut line = String::new();
         for word in s.split_whitespace() {
             let candidate = if line.is_empty() { word.to_string() } else { format!("{line} {word}") };
             if self.width(&candidate, size) > max_w && !line.is_empty() {
-                self.text(&line, x, y, size, color);
-                y += size as f32 * 1.25;
-                line = word.to_string();
+                lines.push(std::mem::replace(&mut line, word.to_string()));
             } else {
                 line = candidate;
             }
         }
         if !line.is_empty() {
+            lines.push(line);
+        }
+        lines
+    }
+
+    /// Word-wrapped text; returns the y after the last line.
+    pub fn wrapped(&self, s: &str, x: f32, mut y: f32, max_w: f32, size: u16, color: Color) -> f32 {
+        for line in self.wrap_lines(s, max_w, size) {
             self.text(&line, x, y, size, color);
             y += size as f32 * 1.25;
         }
         y
     }
 
+    /// A box next to the cursor explaining what is under it. It flips to stay on screen.
+    pub fn tooltip(&self, tip: &Tooltip) {
+        let (mx, my) = mouse().into();
+        let (sw, sh) = (screen_width(), screen_height());
+        let width = 400.0;
+        let inner = width - 32.0;
+        let body = self.wrap_lines(&tip.body, inner, 17);
+        let footer = tip.footer.as_ref().map(|(text, _)| self.wrap_lines(text, inner, 15)).unwrap_or_default();
+        let height = 30.0
+            + 26.0
+            + 14.0
+            + body.len() as f32 * 21.0
+            + if footer.is_empty() { 4.0 } else { 14.0 + footer.len() as f32 * 19.0 }
+            + 12.0;
+        let mut x = mx + 20.0;
+        let mut y = my + 20.0;
+        if x + width > sw - 8.0 {
+            x = mx - width - 20.0;
+        }
+        if y + height > sh - 8.0 {
+            y = (my - height - 12.0).max(8.0);
+        }
+        draw_rectangle(x + 4.0, y + 5.0, width, height, Color::new(0.0, 0.0, 0.0, 0.45));
+        draw_rectangle(x, y, width, height, Color::new(0.06, 0.065, 0.09, 0.98));
+        draw_rectangle(x, y, width, 4.0, tip.color);
+        draw_rectangle_lines(x, y, width, height, 1.0, BORDER);
+        let mut ty = y + 34.0;
+        self.text(&tip.title, x + 16.0, ty, 24, TEXT);
+        ty += 24.0;
+        self.text(&tip.subtitle, x + 16.0, ty, 15, tip.color);
+        ty += 12.0;
+        draw_line(x + 16.0, ty, x + width - 16.0, ty, 1.0, BORDER);
+        ty += 24.0;
+        for line in &body {
+            self.text(line, x + 16.0, ty, 17, Color::new(0.8, 0.82, 0.88, 1.0));
+            ty += 21.0;
+        }
+        if let Some((_, color)) = &tip.footer {
+            ty += 8.0;
+            for line in &footer {
+                self.text(line, x + 16.0, ty, 15, *color);
+                ty += 19.0;
+            }
+        }
+    }
+
     pub fn button(&self, r: Rect, label: &str, enabled: bool, active: bool) -> bool {
-        let hover = enabled && r.contains(mouse_position().into());
+        let hover = enabled && r.contains(mouse());
         let fill = if active { Color::new(0.24, 0.2, 0.1, 0.95) } else if hover { PANEL_HOVER } else { PANEL };
         draw_rectangle(r.x, r.y, r.w, r.h, fill);
         draw_rectangle_lines(r.x, r.y, r.w, r.h, if active { 2.0 } else { 1.0 }, if active { ACCENT } else { BORDER });
@@ -65,6 +129,16 @@ impl Ui {
         self.text(label, r.x + (r.w - self.width(label, size)) / 2.0, r.y + r.h / 2.0 + 6.0, size, color);
         hover && is_mouse_button_pressed(MouseButton::Left)
     }
+}
+
+/// What a tooltip shows: a title, a line of facts, the description and an
+/// optional hint (what you can do with it here).
+pub struct Tooltip {
+    pub title: String,
+    pub color: Color,
+    pub subtitle: String,
+    pub body: String,
+    pub footer: Option<(String, Color)>,
 }
 
 fn fmt_time(seconds: f32) -> String {
@@ -106,6 +180,13 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
             }
         }
     }
+    if let Some((kind, left)) = fx.shrine_banner {
+        let a = left.min(1.0);
+        let c = shrine_color(kind);
+        ui.centered(kind.name(), w / 2.0, 150.0, 30, Color::new(c.r, c.g, c.b, a));
+        ui.centered(kind.effect(), w / 2.0, 180.0, 20, Color::new(TEXT.r, TEXT.g, TEXT.b, a));
+    }
+    shrine_arrows(ui, world);
     if fx.boss_phase_banner > 0.0 {
         let a = (fx.boss_phase_banner / 0.5).min(1.0);
         ui.centered("Immune to Burn! Adds incoming!", w / 2.0, 120.0, 30, Color::new(1.0, 0.6, 0.2, a));
@@ -122,6 +203,15 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
     ];
     for (i, l) in lines.iter().enumerate() {
         ui.text(l, 20.0, 30.0 + i as f32 * 22.0, 18, if i == 2 { ACCENT } else { TEXT });
+    }
+    // Shrine modifiers still running.
+    let mut by = 30.0 + lines.len() as f32 * 22.0 + 12.0;
+    for (kind, left) in &world.shrine_buffs {
+        let c = shrine_color(*kind);
+        draw_rectangle(20.0, by - 12.0, 12.0, 12.0, c);
+        let time = if left.is_infinite() { "map".to_string() } else { format!("{:.0} s", left) };
+        ui.text(&format!("{}  {}", short_effect(*kind), time), 40.0, by, 16, c);
+        by += 20.0;
     }
 
     // Spell bar, bottom center.
@@ -164,6 +254,45 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
 
     if show_stats {
         stats_panel(ui, world, w - 360.0, 20.0);
+    }
+}
+
+fn short_effect(kind: ShrineKind) -> &'static str {
+    match kind {
+        ShrineKind::Fury => "+20% damage",
+        ShrineKind::Swiftness => "+15% move speed",
+        ShrineKind::Haste => "+20% cooldown rate",
+        ShrineKind::Warding => "+15 PR and MR",
+        ShrineKind::Vitality => "healed",
+        ShrineKind::Ancient => "+10% damage",
+    }
+}
+
+/// Arrows on the screen edge toward the nearest shrines out of view.
+fn shrine_arrows(ui: &Ui, world: &World) {
+    let (w, h) = (screen_width(), screen_height());
+    let scale = w / VIEW_WIDTH;
+    let center = vec2(w / 2.0, h / 2.0);
+    let p = world.player.pos;
+    let mut shrines: Vec<_> = world.shrines.iter().map(|s| (s.pos.dist(p), s)).filter(|(d, _)| *d < 2600.0).collect();
+    shrines.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let margin = 44.0;
+    for (dist, shrine) in shrines.into_iter().take(4) {
+        let offset = vec2(shrine.pos.x - p.x, shrine.pos.y - p.y) * scale;
+        let on_screen = center + offset;
+        if on_screen.x > margin && on_screen.x < w - margin && on_screen.y > margin + 60.0 && on_screen.y < h - 140.0 {
+            continue;
+        }
+        let dir = offset.normalize_or_zero();
+        // Walk from the center along the direction until the safe frame.
+        let half = vec2(w / 2.0 - margin, (h - 200.0) / 2.0 - margin);
+        let t = (half.x / dir.x.abs().max(1e-4)).min(half.y / dir.y.abs().max(1e-4));
+        let at = center + dir * t;
+        let c = shrine_color(shrine.kind);
+        let side = dir.perp() * 10.0;
+        draw_triangle(at + dir * 16.0, at - dir * 6.0 + side, at - dir * 6.0 - side, c);
+        let label = format!("{:.0} m", dist / 100.0);
+        ui.text(&label, at.x - ui.width(&label, 14) / 2.0, at.y - 14.0, 14, c);
     }
 }
 
