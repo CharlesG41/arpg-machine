@@ -1,0 +1,14 @@
+[package]
+name = "arpg-machine"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macroquad = "0.4"
+
+# The simulation runs hundreds of enemies per frame; keep dev builds playable.
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
