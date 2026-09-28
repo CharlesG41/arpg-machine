@@ -52,7 +52,7 @@
 - **Choix parmi 3 maps** après chaque map, avec modificateurs et boss visibles.
 - **Tiers infinis après le niveau 50**, avec un classement par seed.
 - **Sorts adaptés du catalogue de God Tower** (250 sorts, 15 familles), avec
-  les stats AD / AP / PR / MR. Étape 1 : 63 sorts. Objectif : 150 minimum
+  les stats AD / AP / PR / MR. 231 sorts adaptés
   (voir [spell-adaptation.md](spell-adaptation.md)).
 - **Résistances ennemies** : carrés et triangles 0 PR / 0 MR, pentagones un
   peu de MR, hexagones un peu de PR. Chaque boss a ses propres stats.

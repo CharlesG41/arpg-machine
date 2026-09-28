@@ -29,11 +29,17 @@ En map :
 - F2 : autopilote (le jeu joue tout seul)
 - Échap : retour à la planification
 
-Benchmark sans fenêtre (tous les builds prêts, 5 seeds, autopilote) :
+Outils sans fenêtre :
 
 ```
 cargo run --release --example bench [tier]
+cargo run --release --example spell_bench
+cargo run --release --example catalogue
 ```
+
+- `bench` : les builds prêts, 5 seeds, autopilote.
+- `spell_bench` : chaque sort seul, comparé à sa catégorie.
+- `catalogue` : tous les sorts avec leur description générée.
 
 ## Contenu
 
@@ -42,9 +48,9 @@ cargo run --release --example bench [tier]
   entre grappes voisines. Chaque sort apparaît une seule fois ; seule la
   disposition change. Acheter un nœud achète le chemin le plus court depuis ce
   qu'on possède déjà, 1 point par nœud. Rembourser un nœud rembourse aussi ce
-  qui ne tient plus à l'Origin. 14 points par défaut (réglable : ça remplace
-  les niveaux).
-- **63 sorts adaptés du catalogue de God Tower**, dans les 15 familles (voir
+  qui ne tient plus à l'Origin. 25 points par défaut (réglable jusqu'à 60 :
+  ça remplace les niveaux).
+- **231 sorts adaptés du catalogue de God Tower**, dans les 15 familles (voir
   [spell-adaptation.md](spell-adaptation.md)). Chaque sort = une livraison
   (projectile, chaîne, nova, cône, blast, zone, orbite, sur soi) + ses effets
   de God Tower. Les descriptions sont générées à partir des chiffres.
@@ -92,7 +98,7 @@ cargo run --release --example bench [tier]
 
 | Build | Clear | Boss | Victoires | Pic kills/min |
 |---|---|---|---|---|
-| Starter (3 sorts, aucun support) | ~3 min | — | 0/5 | ~130 |
+| Starter (4 sorts, aucun support ni artefact) | ~1 min 45 | ~1 min 50 | 3/5 | ~610 |
 | Plague | ~19 s | ~14 s | 5/5 | ~2200 |
 | Inferno | ~22 s | ~31 s | 5/5 | ~1600 |
 | Steel | ~33 s | ~23 s | 5/5 | ~1200 |

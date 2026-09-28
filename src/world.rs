@@ -1,8 +1,9 @@
 //! One map: packs to clear, a progress bar, then a boss.
 use crate::content::{
-    ArtifactKind, Build, Delivery, Family, Hit, Own, Scale, Scope, SelfCond, SpellId, Stat, SupportKind, Targeting,
-    COOLDOWN_SCALE,
+    ArtifactKind, Build, Count, Delivery, Family, Hit, MarkKind, Own, ReserveKind, Scale, Scope, SelfCond, SpellId, Stat,
+    Status, SupportKind, TargetCond, Targeting, COOLDOWN_SCALE,
 };
+use crate::content::ap;
 use crate::grid::Grid;
 use crate::math::V2;
 use crate::rng::Rng;
@@ -34,6 +35,11 @@ const ORBIT_SPACING: f32 = 45.0;
 const BLADE_RADIUS: f32 = 16.0;
 pub const BLADES: usize = 3;
 const MAX_SLOTS: usize = 10;
+const MARKS: usize = 6;
+/// Enemies this close to you count as "nearby" for counts.
+const NEARBY_RADIUS: f32 = 400.0;
+/// Counted reserves (casts, consumes) stop growing here.
+const RESERVE_CAP: f32 = 12.0;
 const PROJECTILE_RANGE: f32 = 650.0;
 const TARGET_RANGE: f32 = 520.0;
 /// Caster (pentagon): keeps its distance and fires slow orbs you can dodge.
@@ -180,13 +186,80 @@ pub struct Enemy {
     attack_timer: f32,
     /// Seconds left winding up an attack; the enemy stands still meanwhile.
     pub windup: f32,
+    /// Seconds left on each of your marks (indexed by MarkKind).
+    pub marks: [f32; MARKS],
+    dusk_owner: u8,
 }
 
 impl Enemy {
     fn resist(&self, magic: bool, pen: f32) -> f32 {
         let (base, shred) = if magic { (self.mr, self.shred_mr.0) } else { (self.armor, self.shred_armor.0) };
-        (base * (1.0 - pen) - shred).max(0.0)
+        let brittle = if self.marked(MarkKind::Brittle) && self.chill > 0.0 { 18.0 } else { 0.0 };
+        (base * (1.0 - pen) - shred - brittle).max(0.0)
     }
+
+    pub fn marked(&self, mark: MarkKind) -> bool {
+        self.marks[mark.index()] > 0.0
+    }
+
+    fn mark_count(&self) -> usize {
+        self.marks.iter().filter(|&&t| t > 0.0).count()
+    }
+}
+
+/// The target as it was before a hit, for conditions.
+#[derive(Clone, Copy)]
+struct TargetView {
+    chilled: bool,
+    burning: bool,
+    poison: u16,
+    bleeding: bool,
+    health: f32,
+    lower_pr: bool,
+    marked: bool,
+}
+
+impl TargetView {
+    fn of(e: &Enemy) -> Self {
+        TargetView {
+            chilled: e.chill > 0.0,
+            burning: e.burn > 0,
+            poison: e.poison,
+            bleeding: e.bleed > 0.0,
+            health: e.hp / e.max_hp,
+            lower_pr: e.armor < e.mr,
+            marked: e.mark_count() > 0,
+        }
+    }
+
+    fn holds(self, cond: TargetCond) -> bool {
+        match cond {
+            TargetCond::Chilled => self.chilled,
+            TargetCond::Burning => self.burning,
+            TargetCond::Poisoned => self.poison > 0,
+            TargetCond::PoisonAtLeast(n) => self.poison >= n,
+            TargetCond::Bleeding => self.bleeding,
+            TargetCond::PoisonedAndBurning => self.poison > 0 && self.burning,
+            TargetCond::BelowHealth(p) => self.health < p,
+            TargetCond::AboveHealth(p) => self.health > p,
+            TargetCond::LowerPrThanMr => self.lower_pr,
+            TargetCond::Marked => self.marked,
+        }
+    }
+}
+
+/// Running state while one cast's hits resolve on one enemy.
+struct HitState {
+    slot: usize,
+    source: u8,
+    family: Family,
+    mult: f32,
+    growth: f32,
+    reserve: f32,
+    view: TargetView,
+    dealt: f32,
+    physical: bool,
+    burn_immune: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -211,6 +284,8 @@ struct CastCtx {
     mult: f32,
     /// Flat damage from growth, added to the first damage hit.
     growth: f32,
+    /// This spell's reserve, captured when it was cast.
+    reserve: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -337,6 +412,11 @@ struct SlotState {
     casts: u32,
     haste: f32,
     haste_time: f32,
+    last_cast: f32,
+    empower: (f32, f32),
+    catalyze: (u16, f32),
+    /// Reserve totals at this spell's last cast.
+    snapshot: [f32; ReserveKind::COUNT],
 }
 
 /// A timed effect on you, keyed by the slot and effect that cast it so a
@@ -352,7 +432,7 @@ struct Timed {
 enum TimedKind {
     Buff { stat: Stat, amount: f32 },
     Regen { per_sec: f32 },
-    Thorns { damage: f32, magic: bool, chill: f32, tick: f32 },
+    Thorns { damage: f32, magic: bool, status: Status, tick: f32 },
 }
 
 /// Everything the equipped artifacts change, resolved once per map.
@@ -416,6 +496,12 @@ pub struct World {
     slots: Vec<SlotState>,
     mods: Mods,
     timed: Vec<Timed>,
+    /// Permanent gains for this map (Grow), indexed like `grow_index`.
+    growth: [f32; 5],
+    reserves: [f32; ReserveKind::COUNT],
+    /// Health lost to enemies: (time, amount).
+    recent_loss: VecDeque<(f32, f32)>,
+    last_kill: f32,
     pub player: Player,
     pub enemies: Vec<Enemy>,
     next_id: u32,
@@ -439,6 +525,8 @@ pub struct World {
     pub boss_start: Option<f32>,
     pub end_time: Option<f32>,
     pub events: Vec<Event>,
+    /// Benchmarks only: you take no damage.
+    pub god_mode: bool,
     death_queue: Vec<(usize, Family)>,
     moves: Vec<(usize, V2)>,
     near: Vec<usize>,
@@ -450,7 +538,18 @@ impl World {
             .slots
             .iter()
             .take(MAX_SLOTS)
-            .map(|s| SlotState { spell: s.spell, support: s.support, cooldown: 0.0, casts: 0, haste: 0.0, haste_time: 0.0 })
+            .map(|s| SlotState {
+                spell: s.spell,
+                support: s.support,
+                cooldown: 0.0,
+                casts: 0,
+                haste: 0.0,
+                haste_time: 0.0,
+                last_cast: f32::NEG_INFINITY,
+                empower: (0.0, 0.0),
+                catalyze: (0, 0.0),
+                snapshot: [0.0; ReserveKind::COUNT],
+            })
             .collect::<Vec<_>>();
         let mods = Mods::from(&build.artifacts);
         let quick = build.artifacts.contains(&ArtifactKind::QuickBoots);
@@ -478,6 +577,10 @@ impl World {
             slots,
             mods,
             timed: Vec::new(),
+            growth: [0.0; 5],
+            reserves: [0.0; ReserveKind::COUNT],
+            recent_loss: VecDeque::new(),
+            last_kill: f32::NEG_INFINITY,
             player: Player {
                 pos: start,
                 hp: max_hp,
@@ -512,6 +615,7 @@ impl World {
             boss_start: None,
             end_time: None,
             events: Vec::new(),
+            god_mode: false,
             death_queue: Vec::new(),
             moves: Vec::new(),
             near: Vec::new(),
@@ -562,6 +666,8 @@ impl World {
             blade_cooldown: [0.0; MAX_SLOTS],
             attack_timer,
             windup: 0.0,
+            marks: [0.0; MARKS],
+            dusk_owner: NO_SOURCE,
         });
         self.next_id += 1;
         self.enemies.len() - 1
@@ -605,8 +711,9 @@ impl World {
             Stat::Ap => BASE_AP + self.mods.ap,
             Stat::Armor => BASE_ARMOR + self.mods.armor,
             Stat::Mr => BASE_MR + self.mods.mr,
-            Stat::DamagePct => 0.0,
-        };
+            Stat::MaxHp => BASE_HP + self.mods.max_hp,
+            Stat::DamagePct | Stat::DamageReduction | Stat::HealingPct | Stat::HealToBarrier => 0.0,
+        } + grow_index(stat).map_or(0.0, |i| self.growth[i]);
         let buffs: f32 = self
             .timed
             .iter()
@@ -619,7 +726,7 @@ impl World {
     }
 
     pub fn max_hp(&self) -> f32 {
-        BASE_HP + self.mods.max_hp
+        self.stat(Stat::MaxHp)
     }
 
     fn eval(&self, s: Scale) -> f32 {
@@ -629,6 +736,39 @@ impl World {
             + s.max_hp * self.max_hp()
             + s.armor * self.stat(Stat::Armor)
             + s.mr * self.stat(Stat::Mr)
+            + s.barrier * self.player.barrier
+    }
+
+    fn count(&self, count: Count, slot: usize, target: Option<usize>) -> f32 {
+        match count {
+            Count::Artifacts => self.build.artifacts.len() as f32,
+            Count::DistinctFamilies => {
+                let mut families: Vec<Family> =
+                    self.slots.iter().enumerate().filter(|(i, _)| *i != slot).map(|(_, s)| s.spell.family()).collect();
+                families.sort();
+                families.dedup();
+                families.len() as f32
+            }
+            Count::EmptySlots => (self.build.capacity.saturating_sub(self.build.used())) as f32,
+            Count::MarksOnTarget => target.map_or(0.0, |t| self.enemies[t].mark_count() as f32),
+            Count::TargetStacks => target.map_or(0.0, |t| (self.enemies[t].poison + self.enemies[t].burn) as f32),
+            Count::Nearby(cond) => {
+                let p = self.player.pos;
+                self.enemies
+                    .iter()
+                    .filter(|e| e.alive && e.awake && e.pos.dist_sq(p) < NEARBY_RADIUS * NEARBY_RADIUS && TargetView::of(e).holds(cond))
+                    .count() as f32
+            }
+            Count::CoolingSpells => {
+                self.slots.iter().enumerate().filter(|(i, s)| *i != slot && s.cooldown > 1.0 * COOLDOWN_SCALE).count() as f32
+            }
+        }
+    }
+
+    /// Reserve stored for a slot since its last cast.
+    fn reserve(&self, slot: usize, kind: ReserveKind) -> f32 {
+        let i = kind.index();
+        self.reserves[i] - self.slots[slot].snapshot[i]
     }
 
     pub fn slot_count(&self) -> usize {
@@ -756,6 +896,9 @@ impl World {
         while self.kill_times.front().is_some_and(|t| self.time - t > 10.0) {
             self.kill_times.pop_front();
         }
+        while self.recent_loss.front().is_some_and(|(t, _)| self.time - t > 5.0) {
+            self.recent_loss.pop_front();
+        }
         // Wait a few seconds so the rolling rate is not inflated by one early pack.
         if self.time > 10.0 {
             self.peak_kills_per_minute = self.peak_kills_per_minute.max(self.kills_per_minute());
@@ -801,11 +944,11 @@ impl World {
             t.time -= DT;
             match &mut t.kind {
                 TimedKind::Regen { per_sec } => regen += *per_sec * DT,
-                TimedKind::Thorns { damage, magic, chill, tick } => {
+                TimedKind::Thorns { damage, magic, status, tick } => {
                     *tick -= DT;
                     if *tick <= 0.0 {
                         *tick += DOT_TICK;
-                        thorns.push((t.key.0, *damage, *magic, *chill));
+                        thorns.push((t.key.0, *damage, *magic, *status));
                     }
                 }
                 TimedKind::Buff { .. } => {}
@@ -813,42 +956,90 @@ impl World {
         }
         self.timed.retain(|t| t.time > 0.0);
         self.heal(regen);
-        for (slot, damage, magic, chill) in thorns {
+        for (slot, damage, magic, status) in thorns {
             self.collect_near(self.player.pos, PLAYER_RADIUS + 14.0);
             let near = self.near.clone();
             let family = self.slots[slot].spell.family();
+            let duration = self.mods.poison_duration;
             for i in near {
                 if damage > 0.0 {
                     self.deal(i, damage, magic, 0.0, slot as u8, family);
                 }
-                if chill > 0.0 {
+                let immune = self.burn_immune(i);
+                if status.burn > 0 {
+                    self.add_burn(i, status.burn, immune);
+                }
+                if status.poison > 0 {
+                    self.add_poison(i, status.poison, duration);
+                }
+                if status.chill > 0.0 {
                     let e = &mut self.enemies[i];
-                    e.chill = e.chill.max(chill);
+                    e.chill = e.chill.max(status.chill);
                 }
             }
         }
     }
 
+    /// Healing from any source: Healing % bonus, heal-to-Barrier, reserves.
     fn heal(&mut self, amount: f32) {
-        if amount > 0.0 {
-            self.player.hp = (self.player.hp + amount).min(self.max_hp());
+        if amount <= 0.0 {
+            return;
+        }
+        let amount = amount * (1.0 + self.stat(Stat::HealingPct) / 100.0);
+        let restored = amount.min(self.max_hp() - self.player.hp).max(0.0);
+        self.player.hp += restored;
+        self.reserves[ReserveKind::Healing.index()] += restored;
+        let to_barrier = self.stat(Stat::HealToBarrier);
+        if to_barrier > 0.0 {
+            self.gain_barrier(amount * to_barrier / 100.0);
         }
     }
 
-    /// Barrier absorbs damage before Health; resistances apply first.
+    fn gain_barrier(&mut self, amount: f32) {
+        if amount <= 0.0 {
+            return;
+        }
+        let before = self.player.barrier;
+        self.player.barrier = (before + amount).min(self.max_hp());
+        self.reserves[ReserveKind::BarrierGained.index()] += self.player.barrier - before;
+    }
+
+    /// Pay a fraction of current Health (never lethal). Returns the Health paid.
+    fn pay_health(&mut self, fraction: f32) -> f32 {
+        let pay = (self.player.hp * fraction).min(self.player.hp - 1.0).max(0.0);
+        self.player.hp -= pay;
+        self.reserves[ReserveKind::HealthPaid.index()] += pay;
+        pay
+    }
+
+    fn burn_immune(&self, index: usize) -> bool {
+        self.boss.as_ref().is_some_and(|b| b.index == index && b.burn_immunity > 0.0)
+    }
+
+    /// Barrier absorbs damage before Health; resistances and damage reduction apply first.
     fn hurt_player(&mut self, raw: f32, magic: bool) {
+        if self.god_mode {
+            return;
+        }
         let resist = self.stat(if magic { Stat::Mr } else { Stat::Armor });
-        let amount = mitigate(raw, resist);
+        let reduction = self.stat(Stat::DamageReduction).min(60.0) / 100.0;
+        let amount = mitigate(raw, resist) * (1.0 - reduction);
         let absorbed = amount.min(self.player.barrier);
         self.player.barrier -= absorbed;
         if absorbed > 0.0 {
+            self.reserves[ReserveKind::BarrierAbsorbed.index()] += absorbed;
             self.events.push(Event::BarrierHit);
         }
         let rest = amount - absorbed;
         if rest > 0.0 {
             self.player.hp -= rest;
+            self.recent_loss.push_back((self.time, rest));
             self.events.push(Event::PlayerHurt { amount: rest });
         }
+    }
+
+    fn recent_loss(&self, secs: f32) -> f32 {
+        self.recent_loss.iter().filter(|(t, _)| self.time - t <= secs).map(|(_, a)| a).sum()
     }
 
     fn move_enemies(&mut self) {
@@ -1023,6 +1214,8 @@ impl World {
             let spell = self.slots[i].spell;
             let s = &mut self.slots[i];
             s.haste_time = (s.haste_time - DT).max(0.0);
+            s.empower.1 = (s.empower.1 - DT).max(0.0);
+            s.catalyze.1 = (s.catalyze.1 - DT).max(0.0);
             if !spell.casts() {
                 continue;
             }
@@ -1043,13 +1236,28 @@ impl World {
         area_mult(support) * self.mods.area
     }
 
-    fn holds(&self, cond: SelfCond) -> bool {
+    fn holds(&self, cond: SelfCond, slot: usize) -> bool {
         let hp = self.player.hp / self.max_hp();
+        let left = slot.checked_sub(1).map(|i| &self.slots[i]);
+        let right = self.slots.get(slot + 1);
+        let me = &self.slots[slot];
         match cond {
             SelfCond::BelowHealth(p) => hp < p,
             SelfCond::AboveHealth(p) => hp > p,
             SelfCond::FullHealth => hp >= 0.999,
             SelfCond::NoBarrier => self.player.barrier <= 0.0,
+            SelfCond::LeftCastWithin(s) => left.is_some_and(|l| self.time - l.last_cast < s),
+            SelfCond::BothNeighborsCast => {
+                matches!((left, right), (Some(l), Some(r)) if l.last_cast > me.last_cast && r.last_cast > me.last_cast)
+            }
+            SelfCond::LeftSizeAtLeast(n) => left.is_some_and(|l| l.spell.size() >= n),
+            SelfCond::NeighborsAllSize1 => matches!((left, right), (Some(l), Some(r)) if l.spell.size() == 1 && r.spell.size() == 1),
+            SelfCond::NeighborsDifferentSize => {
+                matches!((left, right), (Some(l), Some(r)) if l.spell.size() != r.spell.size())
+            }
+            SelfCond::AdNearAp => (self.stat(Stat::Ad) - self.stat(Stat::Ap)).abs() <= 10.0,
+            SelfCond::AdAboveAp => self.stat(Stat::Ad) > self.stat(Stat::Ap),
+            SelfCond::KilledWithin(s) => self.time - self.last_kill < s,
         }
     }
 
@@ -1074,11 +1282,26 @@ impl World {
         let def = spell.def();
         let hunter = support == Some(SupportKind::Hunter);
         let multishot = support == Some(SupportKind::Multishot);
-        let boost = def.boost.filter(|(c, _)| self.holds(*c)).map_or(1.0, |(_, m)| m);
+        let boost = def.boost.filter(|(c, _)| self.holds(*c, slot)).map_or(1.0, |(_, m)| m);
+        let reserve = def
+            .hits
+            .iter()
+            .find_map(|h| match h {
+                Hit::Reserve { kind, at_least_one, .. } => {
+                    let mut n = self.reserve(slot, *kind);
+                    if matches!(kind, ReserveKind::OtherCasts | ReserveKind::SmallCasts | ReserveKind::BurnConsumed) {
+                        n = n.min(RESERVE_CAP);
+                    }
+                    Some(if *at_least_one { n.max(1.0) } else { n })
+                }
+                _ => None,
+            })
+            .unwrap_or(0.0);
         let ctx = CastCtx {
             slot,
             mult: boost * if multishot { 0.8 } else { 1.0 },
             growth: def.growth * casts as f32,
+            reserve,
         };
         let family = def.family;
         let origin = self.player.pos;
@@ -1232,6 +1455,13 @@ impl World {
         if cast {
             self.slots[slot].casts += 1;
             self.apply_own(slot, def.own, 0);
+            // Reserves: this cast counts for the others, then this spell starts fresh.
+            self.reserves[ReserveKind::OtherCasts.index()] += 1.0;
+            if def.size == 1 {
+                self.reserves[ReserveKind::SmallCasts.index()] += 1.0;
+            }
+            self.slots[slot].snapshot = self.reserves;
+            self.slots[slot].last_cast = self.time;
             self.events.push(Event::Cast { slot });
             if self.slots.get(slot + 1).is_some_and(|s| s.support == Some(SupportKind::Echo)) {
                 self.cast(slot + 1);
@@ -1273,7 +1503,7 @@ impl World {
             match *own {
                 Own::Barrier(s) => {
                     let amount = self.eval(s);
-                    self.player.barrier = (self.player.barrier + amount).min(self.max_hp());
+                    self.gain_barrier(amount);
                 }
                 Own::Heal(s) => {
                     let amount = self.eval(s);
@@ -1298,16 +1528,94 @@ impl World {
                     }
                 }
                 Own::PayHealth(p) => {
-                    let pay = self.player.hp * p;
-                    self.player.hp = (self.player.hp - pay).max(1.0);
+                    self.pay_health(p);
                 }
-                Own::Thorns { scale, magic, chill, secs } => {
+                Own::Thorns { scale, magic, status, secs } => {
                     let damage = self.eval(scale);
-                    self.set_timed(key, TimedKind::Thorns { damage, magic, chill, tick: 0.0 }, secs);
+                    self.set_timed(key, TimedKind::Thorns { damage, magic, status, tick: 0.0 }, secs);
                 }
                 Own::If(cond, inner) => {
-                    if depth < 3 && self.holds(cond) {
+                    if depth < 3 && self.holds(cond, slot) {
                         self.apply_own(slot, inner, depth + 1);
+                    }
+                }
+                Own::IfElse(cond, yes, no) => {
+                    if depth < 3 {
+                        let branch = if self.holds(cond, slot) { yes } else { no };
+                        self.apply_own(slot, branch, depth + 1);
+                    }
+                }
+                Own::Alternate(a, b) => {
+                    if depth < 3 {
+                        // `casts` already counts this cast: odd casts take the first branch.
+                        let branch = if self.slots[slot].casts % 2 == 1 { a } else { b };
+                        self.apply_own(slot, branch, depth + 1);
+                    }
+                }
+                Own::Empower { scope, pct, secs } => {
+                    for i in self.scope(slot, scope) {
+                        self.slots[i].empower = (pct, secs);
+                    }
+                }
+                Own::Catalyze { scope, stacks, secs } => {
+                    for i in self.scope(slot, scope) {
+                        self.slots[i].catalyze = (stacks, secs);
+                    }
+                }
+                Own::ConsumeBarrier { fraction, heal, ap, secs } => {
+                    let amount = self.player.barrier * fraction;
+                    self.player.barrier -= amount;
+                    self.heal(amount * heal);
+                    if ap > 0.0 && amount > 0.0 {
+                        self.set_timed(key, TimedKind::Buff { stat: Stat::Ap, amount: amount * ap }, secs);
+                    }
+                }
+                Own::PayForBarrier { pct, ratio } => {
+                    let paid = self.pay_health(pct);
+                    self.gain_barrier(paid * ratio);
+                }
+                Own::Grow { stat, amount } => {
+                    if let Some(i) = grow_index(stat) {
+                        self.growth[i] += amount;
+                        if stat == Stat::MaxHp {
+                            self.player.hp += amount;
+                        }
+                    }
+                }
+                Own::BarrierPer { count, per } => {
+                    let amount = per * self.count(count, slot, None);
+                    self.gain_barrier(amount);
+                }
+                Own::HealPer { count, per } => {
+                    let amount = per * self.count(count, slot, None);
+                    self.heal(amount);
+                }
+                Own::HealFromReserve { kind, ratio } => {
+                    let amount = ratio * self.reserve(slot, kind);
+                    self.heal(amount);
+                    self.events.push(Event::Heal);
+                }
+                Own::HealFromRecent { fraction, secs } => {
+                    let amount = fraction * self.recent_loss(secs);
+                    self.heal(amount);
+                    self.events.push(Event::Heal);
+                }
+                Own::BarrierFromRecent { fraction, secs } => {
+                    let amount = fraction * self.recent_loss(secs);
+                    self.gain_barrier(amount);
+                }
+                Own::ChargeNearestReady(secs) => {
+                    let nearest = (0..self.slots.len())
+                        .filter(|&i| i != slot && self.slots[i].cooldown > 0.0 && self.slots[i].spell.casts())
+                        .min_by(|&a, &b| self.slots[a].cooldown.total_cmp(&self.slots[b].cooldown));
+                    if let Some(i) = nearest {
+                        let s = &mut self.slots[i];
+                        s.cooldown = (s.cooldown - secs * COOLDOWN_SCALE).max(0.0);
+                    }
+                }
+                Own::ChargeFraction { scope, fraction } => {
+                    for i in self.scope(slot, scope) {
+                        self.slots[i].cooldown *= 1.0 - fraction;
                     }
                 }
             }
@@ -1322,7 +1630,7 @@ impl World {
     fn scope(&self, slot: usize, scope: Scope) -> Vec<usize> {
         let n = self.slots.len();
         match scope {
-            Scope::Left => (slot > 0).then(|| slot - 1).into_iter().collect(),
+            Scope::Left => slot.checked_sub(1).into_iter().collect(),
             Scope::Right => (slot + 1 < n).then_some(slot + 1).into_iter().collect(),
             Scope::Adjacent => [slot.checked_sub(1), (slot + 1 < n).then_some(slot + 1)].into_iter().flatten().collect(),
             Scope::Bar => (0..n).collect(),
@@ -1338,8 +1646,6 @@ impl World {
         let spell = self.slots[slot].spell;
         let support = self.slots[slot].support;
         let def = spell.def();
-        let family = def.family;
-        let source = slot as u8;
         let elite = self.enemies[index].kind.elite();
         let elite_bonus: f32 = def
             .hits
@@ -1349,25 +1655,67 @@ impl World {
                 _ => 1.0,
             })
             .product();
-        let mult = ctx.mult * elite_bonus * (1.0 + self.stat(Stat::DamagePct) / 100.0);
-        // Conditions read the target as it was before this hit.
-        let (was_chilled, was_burning, was_poisoned) = {
-            let e = &self.enemies[index];
-            (e.chill > 0.0, e.burn > 0, e.poison > 0)
+        let empower = if self.slots[slot].empower.1 > 0.0 { 1.0 + self.slots[slot].empower.0 / 100.0 } else { 1.0 };
+        let mut st = HitState {
+            slot,
+            source: slot as u8,
+            family: def.family,
+            mult: ctx.mult * elite_bonus * empower * (1.0 + self.stat(Stat::DamagePct) / 100.0),
+            growth: ctx.growth,
+            reserve: ctx.reserve,
+            view: TargetView::of(&self.enemies[index]),
+            dealt: 0.0,
+            physical: false,
+            burn_immune: self.burn_immune(index),
         };
-        let burn_immune = self.boss.as_ref().is_some_and(|b| b.index == index && b.burn_immunity > 0.0);
-        let poison_duration = self.mods.poison_duration;
-        let mut growth = ctx.growth;
-        let mut dealt = 0.0;
-        for hit in def.hits {
+        self.apply_hits(index, def.hits, &mut st, 0);
+        match support {
+            Some(SupportKind::Contagion) => self.spell_poison(index, 3, slot),
+            Some(SupportKind::Combustion) => self.spell_burn(index, 3, slot, st.burn_immune),
+            _ => {}
+        }
+        // Marks react to direct damage from your spells.
+        if st.dealt > 0.0 && self.enemies[index].alive {
+            let e = &self.enemies[index];
+            let (dusk, owner, duel, vow, gravity) = (
+                e.marked(MarkKind::Dusk),
+                e.dusk_owner,
+                e.marked(MarkKind::Duel),
+                e.marked(MarkKind::Vow),
+                e.marked(MarkKind::Gravity),
+            );
+            if dusk && owner != st.source {
+                let raw = self.eval(ap(0.2));
+                self.deal(index, raw, true, 0.0, owner, Family::Shadow);
+            }
+            if duel && st.physical {
+                let raw = self.eval(Scale { ad: 0.25, ..Scale::ZERO });
+                self.deal(index, raw, false, 0.0, st.source, Family::Steel);
+            }
+            if vow {
+                let raw = self.eval(Scale { mr: 0.2, ..Scale::ZERO });
+                self.deal(index, raw, true, 0.0, st.source, Family::Spirits);
+            }
+            if gravity {
+                let e = &mut self.enemies[index];
+                e.chill = e.chill.max(1.0);
+            }
+        }
+        self.enemies[index].last_source = st.source;
+    }
+
+    fn apply_hits(&mut self, index: usize, hits: &'static [Hit], st: &mut HitState, depth: usize) {
+        let (source, family) = (st.source, st.family);
+        for hit in hits {
             match *hit {
                 Hit::Damage { scale, magic, pen } => {
-                    let raw = (self.eval(scale) + growth) * mult;
-                    growth = 0.0;
-                    dealt += self.deal(index, raw, magic, pen, source, family);
+                    let raw = (self.eval(scale) + st.growth) * st.mult;
+                    st.growth = 0.0;
+                    st.dealt += self.deal(index, raw, magic, pen, source, family);
+                    st.physical |= !magic;
                 }
-                Hit::Burn(n) => self.add_burn(index, n, burn_immune),
-                Hit::Poison(n) => self.add_poison(index, n, poison_duration),
+                Hit::Burn(n) => self.spell_burn(index, n, st.slot, st.burn_immune),
+                Hit::Poison(n) => self.spell_poison(index, n, st.slot),
                 Hit::Chill(s) => {
                     let e = &mut self.enemies[index];
                     e.chill = e.chill.max(s);
@@ -1400,26 +1748,29 @@ impl World {
                     e.poison_amp = e.poison_amp.max(s);
                 }
                 Hit::ConsumeChill(scale) => {
-                    if was_chilled {
+                    if st.view.chilled {
                         self.enemies[index].chill = 0.0;
-                        let raw = self.eval(scale) * mult;
-                        dealt += self.deal(index, raw, true, 0.0, source, family);
+                        let raw = self.eval(scale) * st.mult;
+                        st.dealt += self.deal(index, raw, true, 0.0, source, family);
                     }
                 }
                 Hit::ConsumeBurn { scale, per_stack } => {
                     let stacks = std::mem::take(&mut self.enemies[index].burn) as f32;
-                    let raw = (self.eval(scale) + per_stack * stacks) * mult;
-                    dealt += self.deal(index, raw, true, 0.0, source, family);
+                    if stacks > 0.0 {
+                        self.reserves[ReserveKind::BurnConsumed.index()] += 1.0;
+                    }
+                    let raw = (self.eval(scale) + per_stack * stacks) * st.mult;
+                    st.dealt += self.deal(index, raw, true, 0.0, source, family);
                 }
                 Hit::ConsumePoison { scale, per_stack } => {
                     let stacks = std::mem::take(&mut self.enemies[index].poison) as f32;
-                    let raw = (self.eval(scale) + per_stack * stacks) * mult;
-                    dealt += self.deal(index, raw, true, 0.0, source, family);
+                    let raw = (self.eval(scale) + per_stack * stacks) * st.mult;
+                    st.dealt += self.deal(index, raw, true, 0.0, source, family);
                 }
                 Hit::SpreadBurn { radius } => {
                     let (burn, pos) = (self.enemies[index].burn, self.enemies[index].pos);
                     if burn == 0 {
-                        self.add_burn(index, 3, burn_immune);
+                        self.spell_burn(index, 3, st.slot, st.burn_immune);
                     } else {
                         self.collect_near(pos, radius);
                         for i in self.near.clone() {
@@ -1433,17 +1784,41 @@ impl World {
                     }
                 }
                 Hit::BurnIfBurning(n) => {
-                    if was_burning {
-                        self.add_burn(index, n, burn_immune);
+                    if st.view.burning {
+                        self.spell_burn(index, n, st.slot, st.burn_immune);
                     }
                 }
-                Hit::IfPoisonedAndBurning(scale) => {
-                    if was_poisoned && was_burning {
-                        let raw = self.eval(scale) * mult;
-                        dealt += self.deal(index, raw, true, 0.0, source, family);
+                Hit::IfTarget(cond, yes, no) => {
+                    if depth < 3 {
+                        let branch = if st.view.holds(cond) { yes } else { no };
+                        self.apply_hits(index, branch, st, depth + 1);
                     }
                 }
-                Hit::Lifesteal(p) => self.heal(dealt * p),
+                Hit::Mark(kind, secs) => {
+                    let e = &mut self.enemies[index];
+                    e.marks[kind.index()] = e.marks[kind.index()].max(secs);
+                    if kind == MarkKind::Dusk {
+                        e.dusk_owner = source;
+                    }
+                }
+                Hit::Reserve { per, .. } => {
+                    let raw = self.eval(per) * st.reserve * st.mult;
+                    st.dealt += self.deal(index, raw, true, 0.0, source, family);
+                }
+                Hit::PerCount { count, per, magic } => {
+                    let raw = self.eval(per) * self.count(count, st.slot, Some(index)) * st.mult;
+                    st.dealt += self.deal(index, raw, magic, 0.0, source, family);
+                    st.physical |= !magic;
+                }
+                Hit::FromBarrier { ratio, consume } => {
+                    let amount = self.player.barrier;
+                    if consume {
+                        self.player.barrier = 0.0;
+                    }
+                    let raw = amount * ratio * st.mult;
+                    st.dealt += self.deal(index, raw, true, 0.0, source, family);
+                }
+                Hit::Lifesteal(p) => self.heal(st.dealt * p),
                 Hit::HealOnKill(p) => {
                     if !self.enemies[index].alive {
                         let amount = self.max_hp() * p;
@@ -1454,13 +1829,20 @@ impl World {
                 Hit::EliteBonus(_) => {}
             }
         }
-        match support {
-            Some(SupportKind::Contagion) => self.add_poison(index, 3, poison_duration),
-            Some(SupportKind::Combustion) => self.add_burn(index, 3, burn_immune),
-            _ => {}
-        }
-        let e = &mut self.enemies[index];
-        e.last_source = source;
+    }
+
+    /// Burn from a spell: Catalyze on that slot adds stacks.
+    fn spell_burn(&mut self, index: usize, n: u16, slot: usize, immune: bool) {
+        let extra = if self.slots[slot].catalyze.1 > 0.0 { self.slots[slot].catalyze.0 } else { 0 };
+        self.add_burn(index, n + extra, immune);
+        self.enemies[index].last_source = slot as u8;
+    }
+
+    fn spell_poison(&mut self, index: usize, n: u16, slot: usize) {
+        let extra = if self.slots[slot].catalyze.1 > 0.0 { self.slots[slot].catalyze.0 } else { 0 };
+        let duration = self.mods.poison_duration;
+        self.add_poison(index, n + extra, duration);
+        self.enemies[index].last_source = slot as u8;
     }
 
     fn add_burn(&mut self, index: usize, n: u16, immune: bool) {
@@ -1584,7 +1966,7 @@ impl World {
                 *o
             };
             let slot = orbit.slot;
-            let ctx = CastCtx { slot, mult: 1.0, growth: 0.0 };
+            let ctx = CastCtx { slot, mult: 1.0, growth: 0.0, reserve: 0.0 };
             for blade in self.blade_positions(&orbit) {
                 self.collect_near(blade, BLADE_RADIUS);
                 for i in self.near.clone() {
@@ -1613,12 +1995,16 @@ impl World {
                 && e.weaken <= 0.0
                 && e.poison_amp <= 0.0
                 && e.shred_armor.1 <= 0.0
-                && e.shred_mr.1 <= 0.0;
+                && e.shred_mr.1 <= 0.0
+                && e.mark_count() == 0;
             if idle && !orbits {
                 continue;
             }
             e.chill = (e.chill - DT).max(0.0);
             e.freeze = (e.freeze - DT).max(0.0);
+            for mark in &mut e.marks {
+                *mark = (*mark - DT).max(0.0);
+            }
             e.weaken = (e.weaken - DT).max(0.0);
             e.poison_amp = (e.poison_amp - DT).max(0.0);
             for shred in [&mut e.shred_armor, &mut e.shred_mr] {
@@ -1647,7 +2033,8 @@ impl World {
                 // Bleed half its damage per second.
                 let amp = if e.poison_amp > 0.0 { 1.6 } else { 1.0 };
                 let poison = e.poison as f32 * mods.poison_damage * amp;
-                let burn = e.burn as f32 * 1.5 * mods.burn_damage;
+                let brand = if e.burn > 0 && e.marked(MarkKind::Brand) { 15.0 } else { 0.0 };
+                let burn = e.burn as f32 * 1.5 * mods.burn_damage + brand;
                 let bleed = e.bleed * DOT_TICK;
                 let family = if bleed > poison.max(burn) {
                     Family::Blood
@@ -1659,6 +2046,7 @@ impl World {
                 e.burn = e.burn.saturating_sub(1);
                 let source = e.last_source;
                 if poison + burn + bleed > 0.0 {
+                    self.reserves[ReserveKind::PoisonDamage.index()] += poison;
                     self.damage(i, poison + burn + bleed, source, family);
                 }
             }
@@ -1678,6 +2066,7 @@ impl World {
             }
             let e = self.enemies[index].clone();
             self.kills += 1;
+            self.last_kill = self.time;
             self.kill_times.push_back(self.time);
             if let Some(stats) = self.stats.get_mut(e.last_source as usize) {
                 stats.kills += 1;
@@ -1828,6 +2217,18 @@ impl World {
     }
 }
 
+/// Which stats Grow can raise, and where they are stored.
+fn grow_index(stat: Stat) -> Option<usize> {
+    match stat {
+        Stat::Ad => Some(0),
+        Stat::Ap => Some(1),
+        Stat::Armor => Some(2),
+        Stat::Mr => Some(3),
+        Stat::MaxHp => Some(4),
+        _ => None,
+    }
+}
+
 fn area_mult(support: Option<SupportKind>) -> f32 {
     if support == Some(SupportKind::Amplify) {
         1.5
@@ -1962,7 +2363,7 @@ mod tests {
         let hit = |spell: &str, kind| {
             let (mut world, i) = duel(single(spell), kind);
             let before = world.enemies[i].hp;
-            let ctx = CastCtx { slot: 0, mult: 1.0, growth: 0.0 };
+            let ctx = CastCtx { slot: 0, mult: 1.0, growth: 0.0, reserve: 0.0 };
             world.spell_hit(ctx, i);
             before - world.enemies[i].hp
         };
@@ -1977,7 +2378,7 @@ mod tests {
     #[test]
     fn shatter_consumes_chill_for_more_damage() {
         let (mut world, i) = duel(single("Shatter"), EnemyKind::Brute);
-        let ctx = CastCtx { slot: 0, mult: 1.0, growth: 0.0 };
+        let ctx = CastCtx { slot: 0, mult: 1.0, growth: 0.0, reserve: 0.0 };
         let hp = world.enemies[i].hp;
         world.spell_hit(ctx, i);
         let plain = hp - world.enemies[i].hp;
@@ -2026,6 +2427,85 @@ mod tests {
         assert!(world.cast(0));
         let novas = world.events.iter().filter(|e| matches!(e, Event::Nova { .. })).count();
         assert_eq!(novas, 1);
+    }
+
+    fn bar(names: &[&str]) -> Build {
+        Build::new(names.iter().map(|n| Slot { spell: SpellId::named(n), support: None }).collect(), vec![])
+    }
+
+    #[test]
+    fn reserve_counts_other_casts_since_the_last_cast() {
+        let (mut world, _) = duel(bar(&["Arcane Reservoir", "Arcane Bolt"]), EnemyKind::Brute);
+        assert!(world.cast(0));
+        for _ in 0..3 {
+            assert!(world.cast(1));
+        }
+        assert_eq!(world.reserve(0, ReserveKind::OtherCasts), 3.0);
+        assert!(world.cast(0));
+        assert_eq!(world.reserve(0, ReserveKind::OtherCasts), 0.0);
+    }
+
+    #[test]
+    fn dusk_mark_adds_damage_from_other_spells() {
+        let (mut world, i) = duel(bar(&["Dusk Mark", "True Strike"]), EnemyKind::Grunt);
+        world.enemies[i].hp = 10_000.0;
+        let ctx = |slot| CastCtx { slot, mult: 1.0, growth: 0.0, reserve: 0.0 };
+        let hp = world.enemies[i].hp;
+        world.spell_hit(ctx(1), i);
+        let plain = hp - world.enemies[i].hp;
+        world.spell_hit(ctx(0), i);
+        assert!(world.enemies[i].marked(MarkKind::Dusk));
+        let hp = world.enemies[i].hp;
+        world.spell_hit(ctx(1), i);
+        assert!(hp - world.enemies[i].hp > plain + 1.0);
+    }
+
+    #[test]
+    fn alternate_switches_every_cast() {
+        let (mut world, _) = duel(bar(&["Lunar Ward"]), EnemyKind::Grunt);
+        world.player.hp = 100.0;
+        world.cast(0);
+        assert!(world.player.barrier > 0.0 && world.player.hp == 100.0);
+        world.cast(0);
+        assert!(world.player.hp > 100.0);
+    }
+
+    #[test]
+    fn empower_and_catalyze_target_the_right_neighbor() {
+        let (mut world, i) = duel(bar(&["Catalyst", "Cinder Dart"]), EnemyKind::Brute);
+        world.cast(0);
+        world.spell_hit(CastCtx { slot: 1, mult: 1.0, growth: 0.0, reserve: 0.0 }, i);
+        assert_eq!(world.enemies[i].burn, 3 + 3);
+    }
+
+    #[test]
+    fn damage_reduction_and_grow_apply() {
+        let (mut world, _) = duel(bar(&["Obsidian Heart", "Deep Roots"]), EnemyKind::Grunt);
+        world.cast(0);
+        world.cast(1);
+        assert_eq!(world.max_hp(), BASE_HP + 10.0);
+        world.player.hp = 200.0;
+        world.hurt_player(100.0, false);
+        let expected = mitigate(100.0, BASE_ARMOR) * 0.8;
+        assert!((200.0 - world.player.hp - expected).abs() < 1e-3);
+    }
+
+    #[test]
+    fn target_conditions_pick_a_branch() {
+        // Rime Edge: bonus damage on Chilled targets, otherwise it Chills.
+        let (mut world, i) = duel(single("Rime Edge"), EnemyKind::Brute);
+        let ctx = CastCtx { slot: 0, mult: 1.0, growth: 0.0, reserve: 0.0 };
+        world.spell_hit(ctx, i);
+        assert!(world.enemies[i].chill > 0.0);
+    }
+
+    #[test]
+    fn pay_for_barrier_converts_health() {
+        let (mut world, _) = duel(single("Sanguine Armor"), EnemyKind::Grunt);
+        let hp = world.player.hp;
+        world.cast(0);
+        let paid = hp - world.player.hp;
+        assert!((world.player.barrier - paid * 2.5).abs() < 1e-3);
     }
 
     #[test]

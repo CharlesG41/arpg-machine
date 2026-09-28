@@ -2,7 +2,7 @@
 //! artifacts are dragged into place.
 use crate::render::family_color;
 use crate::ui::{Ui, ACCENT, BORDER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
-use arpg_machine::content::{presets, ArtifactKind, Build, SpellId, SupportKind};
+use arpg_machine::content::{presets, ArtifactKind, Build, Family, SpellId, SupportKind};
 use arpg_machine::math::V2;
 use arpg_machine::tree::{SkillTree, ORIGIN};
 use macroquad::prelude::*;
@@ -42,13 +42,32 @@ pub enum PlanAction {
 }
 
 const HEADER: f32 = 76.0;
-pub const DEFAULT_POINTS: u32 = 14;
+pub const DEFAULT_POINTS: u32 = 25;
 const CARD_H: f32 = 92.0;
 const DRAG_THRESHOLD: f32 = 5.0;
 
 // Loadout layout (logical pixels, laid out for the default 1600 × 900 window).
 const COLLECTION_X: f32 = 24.0;
 const LIST_Y: f32 = 150.0;
+/// The spell collection starts below the family filter.
+const SPELLS_Y: f32 = LIST_Y + 34.0;
+const FAMILIES: [Family; 15] = [
+    Family::Arcane,
+    Family::Fire,
+    Family::Frost,
+    Family::Lightning,
+    Family::Poison,
+    Family::Blood,
+    Family::Shadow,
+    Family::Light,
+    Family::Nature,
+    Family::Steel,
+    Family::Earth,
+    Family::Time,
+    Family::Spirits,
+    Family::Alchemy,
+    Family::Astral,
+];
 const BAR_X: f32 = 530.0;
 const BAR_Y: f32 = 150.0;
 const BAR_H: f32 = 132.0;
@@ -82,6 +101,8 @@ pub struct Planner {
     notice: Option<(String, f32)>,
     /// Scroll offset of the spell collection, in pixels.
     list_scroll: f32,
+    /// Show only this family in the spell collection.
+    family_filter: Option<Family>,
 }
 
 impl Planner {
@@ -99,7 +120,17 @@ impl Planner {
             drag: None,
             notice: None,
             list_scroll: 0.0,
+            family_filter: None,
         }
+    }
+
+    /// Spells shown in the collection: available ones, through the family filter.
+    fn listed(&self) -> Vec<SpellId> {
+        self.available().into_iter().filter(|s| self.family_filter.is_none_or(|f| s.family() == f)).collect()
+    }
+
+    fn filter_rect(i: usize) -> Rect {
+        Rect::new(COLLECTION_X + i as f32 * 32.4, LIST_Y, 29.0, 24.0)
     }
 
     /// Spells the loadout may use: the tree's, or all of them in sandbox.
@@ -371,7 +402,7 @@ impl Planner {
             self.tree.set_points(points);
             self.prune();
         }
-        if ui.button(Rect::new(panel.x + 272.0, panel.y + 10.0, 36.0, 32.0), "+", self.tree.points < 36, false) {
+        if ui.button(Rect::new(panel.x + 272.0, panel.y + 10.0, 36.0, 32.0), "+", self.tree.points < 60, false) {
             let points = self.tree.points + 1;
             self.tree.set_points(points);
         }
@@ -410,12 +441,12 @@ impl Planner {
     // ---- loadout ------------------------------------------------------------
 
     fn spell_rect(&self, i: usize) -> Rect {
-        Rect::new(COLLECTION_X + (i % 3) as f32 * 162.0, LIST_Y + (i / 3) as f32 * 50.0 - self.list_scroll, 154.0, 44.0)
+        Rect::new(COLLECTION_X + (i % 3) as f32 * 162.0, SPELLS_Y + (i / 3) as f32 * 50.0 - self.list_scroll, 154.0, 44.0)
     }
 
     /// The visible part of the spell collection; cards outside it are hidden.
     fn list_area() -> Rect {
-        Rect::new(COLLECTION_X, LIST_Y - 4.0, 3.0 * 162.0, screen_height() - LIST_Y - 16.0)
+        Rect::new(COLLECTION_X, SPELLS_Y - 4.0, 3.0 * 162.0, screen_height() - SPELLS_Y - 16.0)
     }
 
     fn right_x() -> f32 {
@@ -496,7 +527,7 @@ impl Planner {
                 return Some((Item::Artifact(self.build.artifacts[i]), Source::ArtifactBar));
             }
         }
-        for (i, spell) in self.available().into_iter().enumerate() {
+        for (i, spell) in self.listed().into_iter().enumerate() {
             if Self::list_area().contains(mouse) && self.spell_rect(i).contains(mouse) {
                 return Some((Item::Spell(spell), Source::Collection));
             }
@@ -584,7 +615,24 @@ impl Planner {
 
     fn loadout_screen(&mut self, ui: &Ui) {
         let mouse: Vec2 = mouse_position().into();
-        let available = self.available();
+        // Family filter: click a color to show only that family, again to show all.
+        for (i, family) in FAMILIES.into_iter().enumerate() {
+            let r = Self::filter_rect(i);
+            let on = self.family_filter == Some(family);
+            let c = family_color(family);
+            draw_rectangle(r.x, r.y, r.w, r.h, Color::new(c.r, c.g, c.b, if on || self.family_filter.is_none() { 0.85 } else { 0.25 }));
+            if on {
+                draw_rectangle_lines(r.x - 2.0, r.y - 2.0, r.w + 4.0, r.h + 4.0, 2.0, WHITE);
+            }
+            if r.contains(mouse) {
+                ui.text(family.name(), COLLECTION_X + 250.0, LIST_Y - 16.0, 14, TEXT);
+                if is_mouse_button_pressed(MouseButton::Left) {
+                    self.family_filter = if on { None } else { Some(family) };
+                    self.list_scroll = 0.0;
+                }
+            }
+        }
+        let available = self.listed();
 
         // Input.
         if is_mouse_button_pressed(MouseButton::Left) && mouse.y > HEADER {
@@ -618,14 +666,10 @@ impl Planner {
         let hovered = dragging.map(|d| d.0).or_else(|| self.pick(mouse).map(|p| p.0));
 
         // Spell collection.
-        let title = if self.sandbox {
-            "All spells (sandbox)".to_string()
-        } else {
-            format!("Spells from your tree ({})", available.len())
-        };
+        let title = if self.sandbox { format!("All spells ({})", available.len()) } else { format!("Your spells ({})", available.len()) };
         ui.text(&title, COLLECTION_X, LIST_Y - 16.0, 20, ACCENT);
         if max_scroll > 0.0 {
-            ui.text("wheel: scroll", COLLECTION_X + 330.0, LIST_Y - 16.0, 14, MUTED);
+            ui.text("wheel: scroll", COLLECTION_X + 390.0, LIST_Y - 16.0, 14, MUTED);
             let track = Rect::new(area.right() - 2.0, area.y, 4.0, area.h);
             let knob_h = (area.h * area.h / (rows * 50.0)).max(30.0);
             let knob_y = track.y + (track.h - knob_h) * (self.list_scroll / max_scroll);
@@ -633,7 +677,8 @@ impl Planner {
             draw_rectangle(track.x, knob_y, track.w, knob_h, BORDER);
         }
         if available.is_empty() {
-            ui.wrapped("Buy spells in the Skill Tree first (Tab).", COLLECTION_X, LIST_Y + 24.0, 460.0, 18, MUTED);
+            let hint = if self.family_filter.is_some() { "No spell of this family." } else { "Buy spells in the Skill Tree first (Tab)." };
+            ui.wrapped(hint, COLLECTION_X, SPELLS_Y + 24.0, 460.0, 18, MUTED);
         }
         for (i, spell) in available.iter().enumerate() {
             let r = self.spell_rect(i);

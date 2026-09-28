@@ -45,12 +45,43 @@ devient ×1,5 contre les rares et les boss ; **Thorncoat** et **Ice Ward**
 Les 15 familles, de 3 à 5 sorts chacune, choisis parmi ceux qui se traduisent
 le mieux et qui couvrent toutes les livraisons.
 
-## Étape 2 : monter à 150
+## Étape 2 (faite) : 231 sorts
 
-- Ajouter environ 90 sorts du catalogue, en priorité ceux qui créent des
-  interactions (adjacence, consommation de statuts, scaling).
-- Quelques briques manquantes pour certains sorts : marques (bonus contre une
-  cible marquée), réserves (« stocke X depuis le dernier cast »), sorts qui
-  alternent entre deux effets, orbes invoquées.
-- Un benchmark par sort (chaque sort seul, puis avec quelques supports) pour
-  repérer ceux qui sont trop forts ou inutiles.
+Tous les sorts du catalogue qui se traduisent, soit 231 sur 250. Il a fallu de
+nouvelles briques :
+
+- **Marques** (Dusk, Brand, Brittle, Duel, Vow, Gravity) : bonus contre une
+  cible marquée.
+- **Réserves** : « stocke X depuis le dernier cast » (casts des autres sorts,
+  casts des sorts de taille 1, Burn consommé, dégâts absorbés par la Barrier,
+  Barrier gagnée, PV payés, soins reçus, dégâts de Poison).
+- **Comptes** : artefacts équipés, familles distinctes, slots vides, marques
+  sur la cible, stacks sur la cible, ennemis proches qui remplissent une
+  condition, sorts encore en cooldown.
+- **Conditions sur la cible** (avec « sinon ») et **conditions sur soi**
+  (voisins, tailles des voisins, AD vs AP, kill récent).
+- **Buffs de slot** : Empower (le voisin fait plus de dégâts) et Catalyze (le
+  voisin applique plus de Poison et de Burn).
+- **Alternance** entre deux effets, **réduction de dégâts**, **soins reçus
+  augmentés**, **soins convertis en Barrier**, **gain permanent** pour la map,
+  **soins et Barrier selon les PV perdus récemment**, **payer des PV contre de
+  la Barrier**, **charger le sort le plus proche d'être prêt**.
+
+Les 19 sorts laissés de côté dépendent trop du duel : Static Cage, Veil of
+Silence, Grief Engine, Haunting Bell, Memory Keeper, Spirit Link, Time Split,
+Thunderbrand, Serpent's Tithe, Venom Courier, Reactive Solvent, Basalt
+Exchange, Orbit, Contagion (le nom est déjà pris par un support), Pulsekeeper,
+Scarlet Rhythm, Bloodletter's Oath, Resonance Lattice, Cauterize.
+
+## Balance
+
+`cargo run --release --example spell_bench` teste chaque sort à côté d'un
+Arcane Bolt, 60 s sur la même map, sans dégâts reçus, et le compare à la
+médiane de sa livraison.
+
+- Les sorts de zone (nova, cône, blast, zone) nettoient bien plus que les
+  projectiles : c'est voulu, les projectiles visent le boss et les rares.
+- Beaucoup de sorts « faibles seuls » sont des sorts de synergie : Flashover
+  sans Burn, Septic Burst sans Poison, Dusk Mark, Pandemic, Capacitor sans
+  Barrier. Ils se jugent dans un build, pas seuls.
+- Prochaine passe : jouer, puis ajuster les chiffres avec ce benchmark.

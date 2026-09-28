@@ -116,10 +116,12 @@ pub struct Scale {
     pub max_hp: f32,
     pub armor: f32,
     pub mr: f32,
+    /// Fraction of your current Barrier.
+    pub barrier: f32,
 }
 
 impl Scale {
-    pub const ZERO: Scale = Scale { flat: 0.0, ad: 0.0, ap: 0.0, max_hp: 0.0, armor: 0.0, mr: 0.0 };
+    pub const ZERO: Scale = Scale { flat: 0.0, ad: 0.0, ap: 0.0, max_hp: 0.0, armor: 0.0, mr: 0.0, barrier: 0.0 };
 
     pub fn text(self) -> String {
         let pct = |x: f32| format!("{:.0}%", x * 100.0);
@@ -142,6 +144,9 @@ impl Scale {
         if self.mr != 0.0 {
             parts.push(format!("{} of your MR", pct(self.mr)));
         }
+        if self.barrier != 0.0 {
+            parts.push(format!("{} of your Barrier", pct(self.barrier)));
+        }
         parts.join(" + ")
     }
 }
@@ -160,6 +165,19 @@ pub const fn flat(x: f32) -> Scale {
 
 pub const fn max_hp(x: f32) -> Scale {
     Scale { max_hp: x, ..Scale::ZERO }
+}
+
+/// Statuses applied together (thorns).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Status {
+    pub poison: u16,
+    pub burn: u16,
+    pub chill: f32,
+}
+
+impl Status {
+    pub const NONE: Status = Status { poison: 0, burn: 0, chill: 0.0 };
+    pub const CHILL: Status = Status { poison: 0, burn: 0, chill: 1.0 };
 }
 
 /// What happens to each enemy a spell hits, in order.
@@ -187,14 +205,168 @@ pub enum Hit {
     SpreadBurn { radius: f32 },
     /// Extra Burn on enemies that are already Burning.
     BurnIfBurning(u16),
-    /// Extra magic damage if the target has both Poison and Burn.
-    IfPoisonedAndBurning(Scale),
+    /// Effects that depend on the target, read before this hit.
+    IfTarget(TargetCond, &'static [Hit], &'static [Hit]),
+    Mark(MarkKind, f32),
+    /// Magic damage: `per` for each unit stored since this spell's last cast.
+    Reserve { kind: ReserveKind, per: Scale, at_least_one: bool },
+    /// Damage: `per` times a count.
+    PerCount { count: Count, per: Scale, magic: bool },
+    /// Magic damage from your Barrier, optionally consuming it.
+    FromBarrier { ratio: f32, consume: bool },
     /// Heal for this fraction of the damage this cast deals.
     Lifesteal(f32),
     /// Heal this fraction of your max Health if the hit kills.
     HealOnKill(f32),
     /// Damage multiplier against rares and bosses.
     EliteBonus(f32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum TargetCond {
+    Chilled,
+    Burning,
+    Poisoned,
+    PoisonAtLeast(u16),
+    Bleeding,
+    PoisonedAndBurning,
+    BelowHealth(f32),
+    AboveHealth(f32),
+    /// Its PR is lower than its MR.
+    LowerPrThanMr,
+    Marked,
+}
+
+impl TargetCond {
+    fn phrase(self) -> String {
+        match self {
+            TargetCond::Chilled => "it is Chilled".into(),
+            TargetCond::Burning => "it is Burning".into(),
+            TargetCond::Poisoned => "it is Poisoned".into(),
+            TargetCond::PoisonAtLeast(n) => format!("it has at least {n} Poison"),
+            TargetCond::Bleeding => "it is Bleeding".into(),
+            TargetCond::PoisonedAndBurning => "it has Poison and Burn".into(),
+            TargetCond::BelowHealth(p) => format!("it is below {:.0}% Health", p * 100.0),
+            TargetCond::AboveHealth(p) => format!("it is above {:.0}% Health", p * 100.0),
+            TargetCond::LowerPrThanMr => "its PR is lower than its MR".into(),
+            TargetCond::Marked => "it has one of your marks".into(),
+        }
+    }
+
+    fn singular(self) -> String {
+        match self {
+            TargetCond::Chilled => "Chilled enemy".into(),
+            TargetCond::Burning => "Burning enemy".into(),
+            TargetCond::Poisoned => "Poisoned enemy".into(),
+            TargetCond::Bleeding => "Bleeding enemy".into(),
+            TargetCond::BelowHealth(p) => format!("enemy below {:.0}% Health", p * 100.0),
+            other => format!("enemy where {}", other.phrase()),
+        }
+    }
+}
+
+/// Marks last a few seconds on an enemy and change how your spells treat it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MarkKind {
+    /// Your other spells' hits deal 20% AP more magic damage to it.
+    Dusk,
+    /// Its Burn ticks deal 15 more damage.
+    Brand,
+    /// While Chilled, its PR and MR are reduced by 18.
+    Brittle,
+    /// Your physical hits deal 25% AD more physical damage to it.
+    Duel,
+    /// Your hits deal 20% of your MR more magic damage to it.
+    Vow,
+    /// Your hits Chill it for 1 s.
+    Gravity,
+}
+
+impl MarkKind {
+    pub const ALL: [MarkKind; 6] = [MarkKind::Dusk, MarkKind::Brand, MarkKind::Brittle, MarkKind::Duel, MarkKind::Vow, MarkKind::Gravity];
+
+    pub fn index(self) -> usize {
+        MarkKind::ALL.iter().position(|&m| m == self).unwrap()
+    }
+
+    fn effect(self) -> &'static str {
+        match self {
+            MarkKind::Dusk => "your other spells' hits deal 20% AP more magic damage to it",
+            MarkKind::Brand => "its Burn ticks deal 15 more damage",
+            MarkKind::Brittle => "while Chilled, its PR and MR are reduced by 18",
+            MarkKind::Duel => "your physical hits deal 25% AD more physical damage to it",
+            MarkKind::Vow => "your hits deal 20% of your MR more magic damage to it",
+            MarkKind::Gravity => "your hits Chill it for 1 s",
+        }
+    }
+}
+
+/// Amounts that pile up between two casts of the same spell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReserveKind {
+    OtherCasts,
+    SmallCasts,
+    BurnConsumed,
+    BarrierAbsorbed,
+    BarrierGained,
+    HealthPaid,
+    Healing,
+    PoisonDamage,
+}
+
+impl ReserveKind {
+    pub const COUNT: usize = 8;
+
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    fn phrase(self) -> &'static str {
+        match self {
+            ReserveKind::OtherCasts => "for each cast of your other spells",
+            ReserveKind::SmallCasts => "for each cast of your other size-1 spells",
+            ReserveKind::BurnConsumed => "for each time another spell consumed Burn",
+            ReserveKind::BarrierAbsorbed => "of the damage your Barrier absorbed",
+            ReserveKind::BarrierGained => "of the Barrier you gained",
+            ReserveKind::HealthPaid => "of the Health your spells paid",
+            ReserveKind::Healing => "of the healing you received",
+            ReserveKind::PoisonDamage => "of the Poison damage you dealt",
+        }
+    }
+
+    /// Counted events (as opposed to amounts, which scale by a fraction).
+    fn counted(self) -> bool {
+        matches!(self, ReserveKind::OtherCasts | ReserveKind::SmallCasts | ReserveKind::BurnConsumed)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Count {
+    Artifacts,
+    /// Distinct families among your other spells on the bar.
+    DistinctFamilies,
+    EmptySlots,
+    MarksOnTarget,
+    /// Poison plus Burn stacks on the target.
+    TargetStacks,
+    /// Enemies near you matching a condition.
+    Nearby(TargetCond),
+    /// Your other spells with more than 1 s of cooldown left.
+    CoolingSpells,
+}
+
+impl Count {
+    fn phrase(self) -> String {
+        match self {
+            Count::Artifacts => "per equipped artifact".into(),
+            Count::DistinctFamilies => "per distinct family among your other spells".into(),
+            Count::EmptySlots => "per empty slot on your bar".into(),
+            Count::MarksOnTarget => "per mark of yours on it".into(),
+            Count::TargetStacks => "per Poison and Burn stack on it".into(),
+            Count::Nearby(cond) => format!("for each {} near you", cond.singular()),
+            Count::CoolingSpells => "per other spell still on cooldown".into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -205,6 +377,13 @@ pub enum Stat {
     Mr,
     /// Percent more damage for your spells.
     DamagePct,
+    /// Percent less damage taken (capped at 60%).
+    DamageReduction,
+    /// Percent more healing received.
+    HealingPct,
+    /// Heals also grant this percent of the healing as Barrier.
+    HealToBarrier,
+    MaxHp,
 }
 
 impl Stat {
@@ -215,6 +394,10 @@ impl Stat {
             Stat::Armor => "PR",
             Stat::Mr => "MR",
             Stat::DamagePct => "% spell damage",
+            Stat::DamageReduction => "% damage reduction",
+            Stat::HealingPct => "% healing received",
+            Stat::HealToBarrier => "% of healing as Barrier",
+            Stat::MaxHp => "max Health",
         }
     }
 }
@@ -244,6 +427,17 @@ pub enum SelfCond {
     AboveHealth(f32),
     FullHealth,
     NoBarrier,
+    /// The spell to the left cast within this many seconds.
+    LeftCastWithin(f32),
+    /// Both neighbors cast since this spell's last cast.
+    BothNeighborsCast,
+    LeftSizeAtLeast(u8),
+    NeighborsAllSize1,
+    NeighborsDifferentSize,
+    /// Your AD and AP are within 10 of each other.
+    AdNearAp,
+    AdAboveAp,
+    KilledWithin(f32),
 }
 
 impl SelfCond {
@@ -253,6 +447,14 @@ impl SelfCond {
             SelfCond::AboveHealth(p) => format!("you are above {:.0}% Health", p * 100.0),
             SelfCond::FullHealth => "you are at full Health".to_string(),
             SelfCond::NoBarrier => "you have no Barrier".to_string(),
+            SelfCond::LeftCastWithin(s) => format!("the spell to the left cast in the last {s:.0} s"),
+            SelfCond::BothNeighborsCast => "both adjacent spells cast since this spell's last cast".to_string(),
+            SelfCond::LeftSizeAtLeast(n) => format!("the spell to the left has size {n} or more"),
+            SelfCond::NeighborsAllSize1 => "both adjacent spells are size 1".to_string(),
+            SelfCond::NeighborsDifferentSize => "the adjacent spells have different sizes".to_string(),
+            SelfCond::AdNearAp => "your AD and AP are within 10 of each other".to_string(),
+            SelfCond::AdAboveAp => "your AD is higher than your AP".to_string(),
+            SelfCond::KilledWithin(s) => format!("you killed an enemy in the last {s:.0} s"),
         }
     }
 }
@@ -270,9 +472,33 @@ pub enum Own {
     Charge { scope: Scope, secs: f32 },
     /// Pay this fraction of your current Health (never lethal).
     PayHealth(f32),
-    /// Enemies touching you take damage every 0.5 s, and may be Chilled.
-    Thorns { scale: Scale, magic: bool, chill: f32, secs: f32 },
+    /// Enemies touching you take damage and statuses every 0.5 s.
+    Thorns { scale: Scale, magic: bool, status: Status, secs: f32 },
     If(SelfCond, &'static [Own]),
+    IfElse(SelfCond, &'static [Own], &'static [Own]),
+    /// Alternates between two effects on each cast.
+    Alternate(&'static [Own], &'static [Own]),
+    /// The targeted spells deal `pct` more damage for `secs`.
+    Empower { scope: Scope, pct: f32, secs: f32 },
+    /// The targeted spells add `stacks` to each Poison or Burn they apply.
+    Catalyze { scope: Scope, stacks: u16, secs: f32 },
+    /// Consume a fraction of your Barrier: heal for part of it, gain AP from part of it.
+    ConsumeBarrier { fraction: f32, heal: f32, ap: f32, secs: f32 },
+    /// Pay Health, then gain Barrier equal to `ratio` times the Health paid.
+    PayForBarrier { pct: f32, ratio: f32 },
+    /// A permanent stat gain for the rest of the map.
+    Grow { stat: Stat, amount: f32 },
+    BarrierPer { count: Count, per: f32 },
+    HealPer { count: Count, per: f32 },
+    /// Heal for `ratio` of a reserve stored since this spell's last cast.
+    HealFromReserve { kind: ReserveKind, ratio: f32 },
+    /// Heal for a fraction of the Health you lost in the last `secs`.
+    HealFromRecent { fraction: f32, secs: f32 },
+    BarrierFromRecent { fraction: f32, secs: f32 },
+    /// Charge your other spell that is closest to ready.
+    ChargeNearestReady(f32),
+    /// Charge by a fraction of the target spell's remaining cooldown.
+    ChargeFraction { scope: Scope, fraction: f32 },
 }
 
 pub struct SpellDef {
@@ -426,7 +652,34 @@ fn hit_text(hit: Hit) -> String {
         }
         Hit::SpreadBurn { .. } => "Copy its Burn to nearby enemies; if it has none, apply 3 Burn.".to_string(),
         Hit::BurnIfBurning(n) => format!("Burning enemies get {n} more Burn."),
-        Hit::IfPoisonedAndBurning(scale) => format!("If it has Poison and Burn, deal {} more magic damage.", scale.text()),
+        Hit::IfTarget(cond, yes, no) => {
+            let yes: Vec<String> = yes.iter().map(|h| lower_first(&hit_text(*h))).collect();
+            let no: Vec<String> = no.iter().map(|h| lower_first(&hit_text(*h))).collect();
+            if no.is_empty() {
+                format!("If {}: {}", cond.phrase(), yes.join(" "))
+            } else {
+                format!("If {}: {} Otherwise: {}", cond.phrase(), yes.join(" "), no.join(" "))
+            }
+        }
+        Hit::Mark(kind, secs) => format!("Mark it for {secs:.0} s: {}.", kind.effect()),
+        Hit::Reserve { kind, per, at_least_one } => {
+            let min = if at_least_one { " (at least once)" } else { "" };
+            if kind.counted() {
+                format!("Deal {} magic damage {}{min} since this spell's last cast.", per.text(), kind.phrase())
+            } else {
+                format!("Deal magic damage equal to {:.0}% {} since this spell's last cast.", per.flat * 100.0, kind.phrase())
+            }
+        }
+        Hit::PerCount { count, per, magic } => {
+            format!("Deal {} {} damage {}.", per.text(), if magic { "magic" } else { "physical" }, count.phrase())
+        }
+        Hit::FromBarrier { ratio, consume } => {
+            if consume {
+                format!("Consume all your Barrier and deal {ratio:.1} magic damage per point.")
+            } else {
+                format!("Deal magic damage equal to {:.0}% of your Barrier.", ratio * 100.0)
+            }
+        }
         Hit::Lifesteal(p) => format!("Heal for {:.0}% of the damage dealt.", p * 100.0),
         Hit::HealOnKill(p) => format!("If it kills, heal {:.0}% of your max Health.", p * 100.0),
         Hit::EliteBonus(m) => format!("×{m:.1} against rares and bosses."),
@@ -448,24 +701,81 @@ fn own_text(own: Own) -> String {
         }
         Own::Charge { scope, secs } => format!("Charge {} by {:.2} s.", scope.phrase(), secs * COOLDOWN_SCALE),
         Own::PayHealth(p) => format!("Pay {:.0}% of your current Health.", p * 100.0),
-        Own::Thorns { scale, magic, chill, secs } => {
-            let dmg = if scale == Scale::ZERO {
-                String::new()
-            } else {
-                format!(" take {} {} damage every 0.5 s", scale.text(), if magic { "magic" } else { "physical" })
-            };
-            let chill = if chill > 0.0 {
-                format!("{} are Chilled", if dmg.is_empty() { "" } else { " and" })
-            } else {
-                String::new()
-            };
-            format!("For {secs:.0} s, enemies touching you{dmg}{chill}.")
+        Own::Thorns { scale, magic, status, secs } => {
+            let mut parts = Vec::new();
+            if scale != Scale::ZERO {
+                parts.push(format!("take {} {} damage", scale.text(), if magic { "magic" } else { "physical" }));
+            }
+            if status.chill > 0.0 {
+                parts.push("are Chilled".to_string());
+            }
+            if status.burn > 0 {
+                parts.push(format!("get {} Burn", status.burn));
+            }
+            if status.poison > 0 {
+                parts.push(format!("get {} Poison", status.poison));
+            }
+            format!("For {secs:.0} s, enemies touching you {} every 0.5 s.", parts.join(" and "))
         }
         Own::If(cond, list) => {
-            let inner: Vec<String> = list.iter().map(|o| own_text(*o)).collect();
+            let inner: Vec<String> = list.iter().map(|o| lower_first(&own_text(*o))).collect();
             format!("If {}: {}", cond.phrase(), inner.join(" "))
         }
+        Own::IfElse(cond, yes, no) => {
+            let yes: Vec<String> = yes.iter().map(|o| lower_first(&own_text(*o))).collect();
+            let no: Vec<String> = no.iter().map(|o| lower_first(&own_text(*o))).collect();
+            format!("If {}: {} Otherwise: {}", cond.phrase(), yes.join(" "), no.join(" "))
+        }
+        Own::Alternate(a, b) => {
+            let a: Vec<String> = a.iter().map(|o| lower_first(&own_text(*o))).collect();
+            let b: Vec<String> = b.iter().map(|o| lower_first(&own_text(*o))).collect();
+            format!("Alternates each cast between: {} And: {}", a.join(" "), b.join(" "))
+        }
+        Own::Empower { scope, pct, secs } => format!("{} deals {pct:.0}% more damage for {secs:.0} s.", capitalize(scope.phrase())),
+        Own::Catalyze { scope, stacks, secs } => {
+            format!("For {secs:.0} s, {} adds {stacks} to each Poison or Burn it applies.", scope.phrase())
+        }
+        Own::ConsumeBarrier { fraction, heal, ap, secs } => {
+            let mut out = format!("Consume {:.0}% of your Barrier", fraction * 100.0);
+            if heal > 0.0 {
+                out += &format!(" and heal for {:.0}% of it", heal * 100.0);
+            }
+            if ap > 0.0 {
+                out += &format!(" and gain AP equal to {:.0}% of it for {secs:.0} s", ap * 100.0);
+            }
+            out + "."
+        }
+        Own::PayForBarrier { pct, ratio } => {
+            format!("Pay {:.0}% of your current Health; gain {ratio:.1}× that as Barrier.", pct * 100.0)
+        }
+        Own::Grow { stat, amount } => format!("Gain +{amount:.0} {} for the rest of the map.", stat_name(stat)),
+        Own::BarrierPer { count, per } => format!("Gain {per:.0} Barrier {}.", count.phrase()),
+        Own::HealPer { count, per } => format!("Heal for {per:.0} {}.", count.phrase()),
+        Own::HealFromReserve { kind, ratio } => {
+            format!("Heal for {:.0}% {} since this spell's last cast.", ratio * 100.0, kind.phrase())
+        }
+        Own::HealFromRecent { fraction, secs } => {
+            format!("Heal for {:.0}% of the Health you lost in the last {secs:.0} s.", fraction * 100.0)
+        }
+        Own::BarrierFromRecent { fraction, secs } => {
+            format!("Gain Barrier equal to {:.0}% of the Health you lost in the last {secs:.0} s.", fraction * 100.0)
+        }
+        Own::ChargeNearestReady(secs) => {
+            format!("Charge your other spell closest to ready by {:.2} s.", secs * COOLDOWN_SCALE)
+        }
+        Own::ChargeFraction { scope, fraction } => {
+            format!("Charge {} by {:.0}% of its remaining cooldown.", scope.phrase(), fraction * 100.0)
+        }
     }
+}
+
+fn stat_name(stat: Stat) -> &'static str {
+    stat.name()
+}
+
+fn lower_first(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_lowercase().collect::<String>() + c.as_str()).unwrap_or_default()
 }
 
 fn capitalize(s: &str) -> String {
@@ -760,7 +1070,10 @@ pub fn presets() -> Vec<(&'static str, Build)> {
     vec![
         (
             "Starter",
-            Build::new(vec![slot("Arcane Bolt", None), slot("Chain Lightning", None), slot("Mending Ray", None)], vec![]),
+            Build::new(
+                vec![slot("Arcane Bolt", None), slot("Chain Lightning", None), slot("Gravity Well", None), slot("Mending Ray", None)],
+                vec![],
+            ),
         ),
         (
             "Plague",
