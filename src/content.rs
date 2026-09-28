@@ -943,6 +943,29 @@ impl ArtifactKind {
     }
 }
 
+/// Something that drops in a map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Loot {
+    Support(SupportKind),
+    Artifact(ArtifactKind),
+}
+
+impl Loot {
+    pub fn name(self) -> &'static str {
+        match self {
+            Loot::Support(s) => s.name(),
+            Loot::Artifact(a) => a.name(),
+        }
+    }
+
+    pub fn kind_name(self) -> &'static str {
+        match self {
+            Loot::Support(_) => "Support",
+            Loot::Artifact(_) => "Artifact",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Slot {
     pub spell: SpellId,

@@ -50,11 +50,20 @@ cargo run --release --example catalogue
   niveaux sur la première map, puis 1 niveau toutes les 1 ou 2 maps. La
   capacité d'artefacts suit le niveau (2 au niveau 1, puis 3/4/5/6/7 aux
   niveaux 5/10/18/28/40). Le bouton « +1 lvl » sert aux tests.
+- **Loot** : 1 ou 2 objets par map, placés à des points aléatoires de la barre
+  de progression (le rythme ne dépend pas de la vitesse du build), et 1 à 3
+  sur le boss. Chaque objet est un support (35 %, seulement ceux pas encore
+  trouvés) ou un artefact. Un rayon lumineux et son nom le signalent au sol ;
+  marcher dessus le ramasse, et tout ce qui est tombé est gagné à la fin de la
+  map, même après une défaite. Supports et artefacts vont au compte
+  (`~/.arpg-machine/account.txt`) ; le Loadout grise ce qui n'est pas encore
+  trouvé et compte les copies d'artefacts (pour la fusion à venir). Le Sandbox
+  garde tout débloqué.
 - **Sauvegarde** : le personnage (niveau, XP, arbre, loadout, tier) est
   sauvegardé automatiquement à chaque changement dans
   `~/.arpg-machine/character.txt`, et rechargé au lancement. « New character »
   le remplace. Les lancements de débogage (variables `ARPG_*`) ne lisent ni
-  n'écrivent la sauvegarde.
+  n'écrivent la sauvegarde ni le compte.
 - **Découverte de l'arbre** : on ne voit que ses nœuds et ceux juste à côté ;
   des amorces de lignes montrent qu'il y a autre chose plus loin. Au moins 4
   des 6 sorties de l'Origin font des dégâts.

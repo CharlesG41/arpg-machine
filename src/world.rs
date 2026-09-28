@@ -1,6 +1,6 @@
 //! One map: packs to clear, a progress bar, then a boss.
 use crate::content::{
-    ArtifactKind, Build, Count, Delivery, Family, Hit, MarkKind, Own, ReserveKind, Scale, Scope, SelfCond, SpellId, Stat,
+    ArtifactKind, Build, Count, Delivery, Family, Hit, Loot, MarkKind, Own, ReserveKind, Scale, Scope, SelfCond, SpellId, Stat,
     Status, SupportKind, TargetCond, Targeting, COOLDOWN_SCALE,
 };
 use crate::content::ap;
@@ -111,6 +111,16 @@ impl ShrineKind {
 }
 
 pub const SHRINE_DURATION: f32 = 30.0;
+const LOOT_PICKUP: f32 = 50.0;
+
+/// A support or artifact lying on the ground. Everything dropped is yours at
+/// the end of the map; walking over it just picks it up now.
+#[derive(Clone, Debug)]
+pub struct LootDrop {
+    pub pos: V2,
+    pub loot: Loot,
+    pub picked: bool,
+}
 
 #[derive(Clone, Debug)]
 pub struct Shrine {
@@ -463,6 +473,8 @@ pub enum Event {
     BossSpawned { pos: V2 },
     BossPhaseTwo { pos: V2 },
     ShrineClaimed { pos: V2, kind: ShrineKind },
+    LootDropped { pos: V2, loot: Loot },
+    LootPicked { loot: Loot },
     /// Enemy indices changed; per-enemy visual state must be reset.
     Compacted,
 }
@@ -574,6 +586,11 @@ pub struct World {
     next_shrine: u32,
     /// Shrine effects still running: kind and seconds left (infinite for Ancient).
     pub shrine_buffs: Vec<(ShrineKind, f32)>,
+    pub drops: Vec<LootDrop>,
+    /// Progress values at which the next kill drops loot (1 or 2 per map).
+    drop_thresholds: Vec<f32>,
+    /// Supports the account already has: they no longer drop.
+    owned_supports: Vec<SupportKind>,
     start: V2,
     pub projectiles: Vec<Projectile>,
     pub enemy_shots: Vec<EnemyShot>,
@@ -671,6 +688,9 @@ impl World {
             shrines: Vec::new(),
             next_shrine: 0,
             shrine_buffs: Vec::new(),
+            drops: Vec::new(),
+            drop_thresholds: Vec::new(),
+            owned_supports: Vec::new(),
             start,
             projectiles: Vec::new(),
             enemy_shots: Vec::new(),
@@ -697,8 +717,61 @@ impl World {
             moves: Vec::new(),
             near: Vec::new(),
         };
+        let drops_in_map = if world.rng.chance(0.5) { 2 } else { 1 };
+        let mut thresholds: Vec<f32> =
+            (0..drops_in_map).map(|_| world.rng.range(0.15, 0.95) * PROGRESS_NEEDED).collect();
+        thresholds.sort_by(f32::total_cmp);
+        world.drop_thresholds = thresholds;
         world.ensure_chunks();
         world
+    }
+
+    /// Supports the account already owns never drop.
+    pub fn with_owned_supports(mut self, owned: Vec<SupportKind>) -> Self {
+        self.owned_supports = owned;
+        self
+    }
+
+    /// Everything that dropped this map, picked up or not.
+    pub fn loot(&self) -> Vec<Loot> {
+        self.drops.iter().map(|d| d.loot).collect()
+    }
+
+    /// A support you do not have yet (35%) or an artifact.
+    fn roll_loot(&mut self) -> Loot {
+        let dropped: Vec<SupportKind> = self
+            .drops
+            .iter()
+            .filter_map(|d| match d.loot {
+                Loot::Support(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        let missing: Vec<SupportKind> = SupportKind::ALL
+            .into_iter()
+            .filter(|s| !self.owned_supports.contains(s) && !dropped.contains(s))
+            .collect();
+        if !missing.is_empty() && self.rng.chance(0.35) {
+            Loot::Support(missing[self.rng.range_usize(0, missing.len() - 1)])
+        } else {
+            Loot::Artifact(ArtifactKind::ALL[self.rng.range_usize(0, ArtifactKind::ALL.len() - 1)])
+        }
+    }
+
+    fn drop_loot(&mut self, pos: V2) {
+        let loot = self.roll_loot();
+        self.drops.push(LootDrop { pos, loot, picked: false });
+        self.events.push(Event::LootDropped { pos, loot });
+    }
+
+    fn pick_up_loot(&mut self) {
+        let p = self.player.pos;
+        for drop in &mut self.drops {
+            if !drop.picked && drop.pos.dist(p) < LOOT_PICKUP + PLAYER_RADIUS {
+                drop.picked = true;
+                self.events.push(Event::LootPicked { loot: drop.loot });
+            }
+        }
     }
 
     fn hp_mult(&self) -> f32 {
@@ -1097,6 +1170,7 @@ impl World {
             self.ensure_chunks();
         }
         self.claim_shrines();
+        self.pick_up_loot();
         for (_, left) in &mut self.shrine_buffs {
             *left -= DT;
         }
@@ -2304,11 +2378,21 @@ impl World {
             self.heal(self.mods.heal_per_kill);
             if self.phase == Phase::Clearing {
                 self.progress = (self.progress + e.kind.progress()).min(PROGRESS_NEEDED);
+                // The kill that crosses a loot threshold drops the item.
+                while self.drop_thresholds.first().is_some_and(|&t| self.progress >= t) {
+                    self.drop_thresholds.remove(0);
+                    self.drop_loot(e.pos);
+                }
             }
             self.events.push(Event::Death { pos: e.pos, kind: e.kind, family, radius: e.radius });
             if e.kind == EnemyKind::Boss {
                 self.phase = Phase::Victory;
                 self.end_time = Some(self.time);
+                let count = self.rng.range_usize(1, 3);
+                for k in 0..count {
+                    let offset = V2::from_angle(k as f32 * TAU / count as f32 + 0.4) * 45.0;
+                    self.drop_loot(e.pos + offset);
+                }
                 continue;
             }
             if contagion && e.poison > 0 {
@@ -2500,6 +2584,13 @@ pub fn autopilot(world: &World) -> Input {
                 to_boss.norm().rotate(1.5)
             };
             return Input { move_dir: dir, dash: false };
+        }
+    }
+    // Pick up loot close by when nothing is in your face.
+    let close = world.enemies.iter().any(|e| e.alive && e.awake && e.pos.dist_sq(p) < 90.0 * 90.0);
+    if !close {
+        if let Some(d) = world.drops.iter().filter(|d| !d.picked && d.pos.dist(p) < 400.0).min_by(|a, b| a.pos.dist(p).total_cmp(&b.pos.dist(p))) {
+            return Input { move_dir: (d.pos - p).norm(), dash: false };
         }
     }
     // Detour to a close shrine when nothing is in your face.
@@ -2803,6 +2894,25 @@ mod tests {
             world.update_timed();
         }
         assert_eq!(world.stat(Stat::DamagePct), 20.0);
+    }
+
+    #[test]
+    fn a_map_drops_one_or_two_items_and_the_boss_one_to_three() {
+        for seed in 1..=6 {
+            let world = run(preset("Plague"), seed, 600.0);
+            assert_eq!(world.phase, Phase::Victory);
+            let n = world.loot().len();
+            assert!((2..=5).contains(&n), "seed {seed}: {n} drops");
+        }
+    }
+
+    #[test]
+    fn owned_supports_never_drop() {
+        let world = World::new(Build::empty(), 3, 1).with_owned_supports(SupportKind::ALL.to_vec());
+        let mut world = world;
+        for _ in 0..50 {
+            assert!(matches!(world.roll_loot(), Loot::Artifact(_)));
+        }
     }
 
     #[test]

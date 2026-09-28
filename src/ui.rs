@@ -1,5 +1,5 @@
 //! Shared interface helpers, the in-map HUD and the result panel.
-use crate::render::{family_color, shrine_color, VIEW_WIDTH};
+use crate::render::{family_color, loot_color, shrine_color, VIEW_WIDTH};
 use arpg_machine::character::Character;
 use arpg_machine::world::{Phase, ShrineKind, World, MOMENTUM_MAX, PROGRESS_NEEDED};
 use macroquad::prelude::*;
@@ -188,6 +188,13 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
         ui.centered(kind.effect(), w / 2.0, 180.0, 20, Color::new(TEXT.r, TEXT.g, TEXT.b, a));
     }
     shrine_arrows(ui, world);
+    loot_labels(ui, world);
+    if let Some((loot, left)) = fx.loot_banner {
+        let a = left.min(1.0);
+        let c = loot_color(loot);
+        ui.centered(&format!("Found: {}", loot.name()), w / 2.0, 230.0, 28, Color::new(c.r, c.g, c.b, a));
+        ui.centered(loot.kind_name(), w / 2.0, 256.0, 18, Color::new(TEXT.r, TEXT.g, TEXT.b, a));
+    }
     if fx.boss_phase_banner > 0.0 {
         let a = (fx.boss_phase_banner / 0.5).min(1.0);
         ui.centered("Immune to Burn! Adds incoming!", w / 2.0, 120.0, 30, Color::new(1.0, 0.6, 0.2, a));
@@ -281,6 +288,25 @@ fn short_effect(kind: ShrineKind) -> &'static str {
     }
 }
 
+/// Names above loot beams that are on screen.
+fn loot_labels(ui: &Ui, world: &World) {
+    let (w, h) = (screen_width(), screen_height());
+    let scale = w / VIEW_WIDTH;
+    let center = vec2(w / 2.0, h / 2.0);
+    let p = world.player.pos;
+    for drop in world.drops.iter().filter(|d| !d.picked) {
+        let at = center + vec2(drop.pos.x - p.x, drop.pos.y - p.y) * scale;
+        if at.x < 0.0 || at.x > w || at.y < 0.0 || at.y > h {
+            continue;
+        }
+        let label = drop.loot.name();
+        let y = at.y - 140.0 * scale - 8.0;
+        let tw = ui.width(label, 16);
+        draw_rectangle(at.x - tw / 2.0 - 6.0, y - 16.0, tw + 12.0, 22.0, Color::new(0.03, 0.035, 0.05, 0.85));
+        ui.text(label, at.x - tw / 2.0, y, 16, loot_color(drop.loot));
+    }
+}
+
 /// Arrows on the screen edge toward the nearest shrines out of view.
 fn shrine_arrows(ui: &Ui, world: &World) {
     let (w, h) = (screen_width(), screen_height());
@@ -352,7 +378,15 @@ pub fn result_panel(ui: &Ui, world: &World) -> ResultAction {
     let (w, h) = (screen_width(), screen_height());
     draw_rectangle(0.0, 0.0, w, h, Color::new(0.0, 0.0, 0.0, 0.55));
     let pw = 520.0;
-    let ph = 330.0 + world.stats.len() as f32 * 26.0;
+    let loot = world.loot();
+    let loot_text = if loot.is_empty() {
+        "Loot: nothing this time.".to_string()
+    } else {
+        let names: Vec<String> = loot.iter().map(|l| format!("{} ({})", l.name(), l.kind_name().to_lowercase())).collect();
+        format!("Loot: {}", names.join(", "))
+    };
+    let loot_lines = ui.wrap_lines(&loot_text, pw - 80.0, 18);
+    let ph = 330.0 + world.stats.len() as f32 * 26.0 + loot_lines.len() as f32 * 22.0 + 10.0;
     let (px, py) = ((w - pw) / 2.0, (h - ph) / 2.0);
     draw_rectangle(px, py, pw, ph, PANEL);
     draw_rectangle_lines(px, py, pw, ph, 2.0, BORDER);
@@ -370,7 +404,10 @@ pub fn result_panel(ui: &Ui, world: &World) -> ResultAction {
     for (i, l) in lines.iter().enumerate() {
         ui.text(l, px + 40.0, py + 100.0 + i as f32 * 28.0, 20, TEXT);
     }
-    stats_panel(ui, world, px + 90.0, py + 214.0);
+    for (i, line) in loot_lines.iter().enumerate() {
+        ui.text(line, px + 40.0, py + 216.0 + i as f32 * 22.0, 18, Color::new(1.0, 0.75, 0.35, 1.0));
+    }
+    stats_panel(ui, world, px + 90.0, py + 226.0 + loot_lines.len() as f32 * 22.0);
     let by = py + ph - 60.0;
     let replay = ui.button(Rect::new(px + 40.0, by, 210.0, 40.0), "Replay, new map (R)", true, true);
     let edit = ui.button(Rect::new(px + 270.0, by, 210.0, 40.0), "Edit build (B)", true, false);

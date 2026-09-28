@@ -4,7 +4,7 @@ use crate::render::family_color;
 use crate::ui::{Tooltip, Ui, ACCENT, BORDER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
 use arpg_machine::account::{tier_scaling, Account};
 use arpg_machine::character::Character;
-use arpg_machine::content::{presets, ArtifactKind, Build, Family, SpellId, SupportKind};
+use arpg_machine::content::{presets, ArtifactKind, Build, Family, Loot, SpellId, SupportKind};
 use arpg_machine::math::V2;
 use arpg_machine::tree::{SkillTree, ORIGIN};
 use macroquad::prelude::*;
@@ -90,6 +90,8 @@ fn v2(p: V2) -> Vec2 {
 
 pub struct Planner {
     pub account: Account,
+    /// False for debug runs: the account on disk is never read or written.
+    persist: bool,
     pub character: Character,
     pub tree: SkillTree,
     pub build: Build,
@@ -114,12 +116,14 @@ impl Planner {
         let mut build = Build::empty();
         build.artifact_capacity = character.artifact_capacity();
         let account = Account::load();
+        let tier = account.max_tier;
         Planner {
             account,
+            persist: true,
             character,
             tree: SkillTree::generate(seed, character.skill_points()),
             build,
-            tier: account.max_tier,
+            tier,
             sandbox: false,
             tab: Tab::Tree,
             pan: Vec2::ZERO,
@@ -153,7 +157,15 @@ impl Planner {
         }
     }
 
-    /// Drops bar spells the tree no longer grants.
+    fn owns_support(&self, support: SupportKind) -> bool {
+        self.sandbox || self.account.has_support(support)
+    }
+
+    fn owns_artifact(&self, artifact: ArtifactKind) -> bool {
+        self.sandbox || self.account.artifact_copies(artifact) > 0
+    }
+
+    /// Drops from the loadout what the tree no longer grants or the account does not own.
     fn prune(&mut self) {
         let available = self.available();
         let before = self.build.slots.len();
@@ -161,10 +173,36 @@ impl Planner {
         if self.build.slots.len() < before {
             self.say("Refunded spells left the spell bar.");
         }
+        if !self.sandbox {
+            let account = &self.account;
+            for slot in &mut self.build.slots {
+                if slot.support.is_some_and(|s| !account.has_support(s)) {
+                    slot.support = None;
+                }
+            }
+            self.build.artifacts.retain(|&a| account.artifact_copies(a) > 0);
+        }
     }
 
+    /// Loot from a map goes to the account collection (saved).
+    pub fn receive_loot(&mut self, loot: &[Loot]) {
+        if loot.is_empty() {
+            return;
+        }
+        for &item in loot {
+            self.account.add(item);
+        }
+        self.save_account();
+        let names: Vec<&str> = loot.iter().map(|l| l.name()).collect();
+        self.say(&format!("Found: {}.", names.join(", ")));
+    }
+
+    /// A message at the bottom of the screen; messages arriving together chain.
     fn say(&mut self, message: &str) {
-        self.notice = Some((message.to_string(), 3.0));
+        self.notice = match self.notice.take() {
+            Some((text, left)) if left > 2.0 => Some((format!("{text}  ·  {message}"), 4.5)),
+            _ => Some((message.to_string(), 3.5)),
+        };
     }
 
     /// The planner for a saved character.
@@ -212,10 +250,23 @@ impl Planner {
         self.prune();
     }
 
+    /// Debug runs (screenshots, presets) play with a fresh account and never save it.
+    pub fn detach_from_disk(&mut self) {
+        self.persist = false;
+        self.account = Account::default();
+        self.tier = 1;
+    }
+
+    fn save_account(&self) {
+        if self.persist {
+            self.account.save();
+        }
+    }
+
     /// A boss kill: may unlock the next tier (saved on the account).
     pub fn record_victory(&mut self, tier: u32) {
         if let Some(unlocked) = self.account.record_victory(tier) {
-            self.account.save();
+            self.save_account();
             self.say(&format!("Tier {unlocked} unlocked!"));
         }
     }
@@ -737,7 +788,16 @@ impl Planner {
         // Input.
         if is_mouse_button_pressed(MouseButton::Left) && mouse.y > HEADER {
             if let Some((item, source)) = self.pick(mouse) {
-                self.drag = Some(Drag { item, source, start: mouse, active: false });
+                let locked = match item {
+                    Item::Support(s) => !self.owns_support(s),
+                    Item::Artifact(a) => !self.owns_artifact(a),
+                    Item::Spell(_) => false,
+                };
+                if locked {
+                    self.say("Not found yet: supports and artifacts drop from monsters and bosses.");
+                } else {
+                    self.drag = Some(Drag { item, source, start: mouse, active: false });
+                }
             }
         }
         if let Some(drag) = &mut self.drag {
@@ -896,12 +956,19 @@ impl Planner {
         for (i, s) in SupportKind::ALL.into_iter().enumerate() {
             let r = Self::support_rect(i);
             let used_on = self.build.slots.iter().find(|slot| slot.support == Some(s)).map(|slot| slot.spell);
+            let owned = self.owns_support(s);
             let hover = r.contains(mouse) && dragging.is_none();
-            draw_rectangle(r.x, r.y, r.w, r.h, if hover { PANEL_HOVER } else { PANEL });
+            let fill = if !owned { Color::new(0.05, 0.055, 0.07, 0.9) } else if hover { PANEL_HOVER } else { PANEL };
+            draw_rectangle(r.x, r.y, r.w, r.h, fill);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, BORDER);
-            ui.text(s.name(), r.x + 12.0, r.y + 21.0, 17, if used_on.is_some() { MUTED } else { TEXT });
-            let sub = used_on.map_or_else(|| "available".to_string(), |spell| format!("on {}", spell.name()));
-            ui.text(&sub, r.x + 12.0, r.y + 39.0, 13, if used_on.is_some() { GOOD } else { MUTED });
+            let dim = Color::new(0.35, 0.37, 0.44, 1.0);
+            ui.text(s.name(), r.x + 12.0, r.y + 21.0, 17, if !owned { dim } else if used_on.is_some() { MUTED } else { TEXT });
+            let sub = if !owned {
+                "not found yet".to_string()
+            } else {
+                used_on.map_or_else(|| "available".to_string(), |spell| format!("on {}", spell.name()))
+            };
+            ui.text(&sub, r.x + 12.0, r.y + 39.0, 13, if !owned { dim } else if used_on.is_some() { GOOD } else { MUTED });
         }
 
         // Artifacts.
@@ -911,12 +978,29 @@ impl Planner {
         for (i, a) in ArtifactKind::ALL.into_iter().enumerate() {
             let r = Self::artifact_rect(i);
             let equipped = self.build.has_artifact(a);
+            let owned = self.owns_artifact(a);
+            let copies = self.account.artifact_copies(a);
             let hover = r.contains(mouse) && dragging.is_none();
-            draw_rectangle(r.x, r.y, r.w, r.h, if hover { PANEL_HOVER } else { Color::new(0.1, 0.09, 0.07, 0.95) });
+            let fill = if !owned {
+                Color::new(0.05, 0.05, 0.05, 0.9)
+            } else if hover {
+                PANEL_HOVER
+            } else {
+                Color::new(0.1, 0.09, 0.07, 0.95)
+            };
+            draw_rectangle(r.x, r.y, r.w, r.h, fill);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.35, 0.3, 0.2, 1.0));
-            ui.text(a.name(), r.x + 12.0, r.y + 21.0, 17, if equipped { MUTED } else { TEXT });
-            let sub = if equipped { "equipped".to_string() } else { format!("size {}", a.size()) };
-            ui.text(&sub, r.x + 12.0, r.y + 39.0, 13, if equipped { GOOD } else { MUTED });
+            let dim = Color::new(0.35, 0.33, 0.3, 1.0);
+            ui.text(a.name(), r.x + 12.0, r.y + 21.0, 17, if !owned { dim } else if equipped { MUTED } else { TEXT });
+            let count = if copies > 1 && !self.sandbox { format!(" · ×{copies}") } else { String::new() };
+            let sub = if !owned {
+                "not found yet".to_string()
+            } else if equipped {
+                format!("equipped{count}")
+            } else {
+                format!("size {}{count}", a.size())
+            };
+            ui.text(&sub, r.x + 12.0, r.y + 39.0, 13, if !owned { dim } else if equipped { GOOD } else { MUTED });
         }
 
         // The card under the cursor while dragging.
@@ -961,6 +1045,9 @@ impl Planner {
             Item::Support(support) => {
                 let used_on = self.build.slots.iter().find(|s| s.support == Some(support)).map(|s| s.spell);
                 let footer = match (source, used_on) {
+                    _ if !self.owns_support(support) => {
+                        ("Not found yet: drops from monsters and bosses, once per account.".to_string(), MUTED)
+                    }
                     (Source::Socket, _) => ("Drag it to another socket, or off the bar to remove it.".to_string(), GOOD),
                     (_, Some(spell)) => (format!("On {}. Dragging it elsewhere moves it.", spell.name()), GOOD),
                     _ => {
@@ -983,6 +1070,7 @@ impl Planner {
             }
             Item::Artifact(artifact) => {
                 let footer = match source {
+                    _ if !self.owns_artifact(artifact) => ("Not found yet: drops from monsters and bosses.".to_string(), MUTED),
                     Source::ArtifactBar => ("Equipped. Drag along the bar to reorder, or off it to remove.".to_string(), GOOD),
                     _ if self.build.has_artifact(artifact) => ("Equipped.".to_string(), GOOD),
                     _ if self.build.artifacts_used() + artifact.size() > self.build.artifact_capacity => (

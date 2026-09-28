@@ -72,6 +72,9 @@ async fn main() {
         (false, Some(save)) => Planner::from_save(&save),
         _ => Planner::new(1),
     };
+    if debug_run {
+        planner.detach_from_disk();
+    }
     let mut saved_text = planner.save_text();
     let mut map_seed = 1u64;
     let mut screen = Screen::Plan;
@@ -91,7 +94,7 @@ async fn main() {
     let find_preset = |name: &str| presets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|p| p.1);
     if let Some(build) = env("ARPG_PRESET").and_then(|n| find_preset(&n)) {
         planner.load_preset(build);
-        world = Some(World::new(planner.build.clone(), map_seed, planner.tier));
+        world = Some(World::new(planner.build.clone(), map_seed, planner.tier).with_owned_supports(planner.account.supports.clone()));
         screen = Screen::Play;
     }
     if let Some(build) = env("ARPG_PLAN").and_then(|n| find_preset(&n)) {
@@ -117,7 +120,7 @@ async fn main() {
         match screen {
             Screen::Plan => {
                 if let PlanAction::Play = planner.draw(&ui) {
-                    world = Some(World::new(planner.build.clone(), map_seed, planner.tier));
+                    world = Some(World::new(planner.build.clone(), map_seed, planner.tier).with_owned_supports(planner.account.supports.clone()));
                     fx = Fx::new();
                     accumulator = 0.0;
                     result_delay = 0.0;
@@ -133,6 +136,7 @@ async fn main() {
                         // Leaving early keeps the experience (light death penalty, design §9).
                         if !xp_banked {
                             planner.gain_xp(w.xp);
+                            planner.receive_loot(&w.loot());
                             xp_banked = true;
                         }
                         screen = Screen::Plan;
@@ -166,6 +170,7 @@ async fn main() {
                             screen = Screen::Result;
                             if !xp_banked {
                                 planner.gain_xp(w.xp);
+                                planner.receive_loot(&w.loot());
                                 if w.phase == Phase::Victory {
                                     planner.record_victory(w.tier);
                                 }
@@ -185,7 +190,7 @@ async fn main() {
                     match ui::result_panel(&ui, w) {
                         ResultAction::Replay => {
                             map_seed = map_seed.wrapping_add(1);
-                            *w = World::new(planner.build.clone(), map_seed, planner.tier);
+                            *w = World::new(planner.build.clone(), map_seed, planner.tier).with_owned_supports(planner.account.supports.clone());
                             fx = Fx::new();
                             result_delay = 0.0;
                             xp_banked = false;

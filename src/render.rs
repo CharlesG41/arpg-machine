@@ -1,6 +1,6 @@
 //! Procedural look: silhouettes, code-driven motion, and all the spectacle in
 //! effects. Everything here reads the simulation; nothing writes back to it.
-use arpg_machine::content::Family;
+use arpg_machine::content::{Family, Loot};
 use arpg_machine::math::V2;
 use arpg_machine::rng::Rng;
 use arpg_machine::world::{EnemyKind, Event, Phase, ShrineKind, World, PLAYER_RADIUS};
@@ -43,6 +43,13 @@ fn enemy_color(kind: EnemyKind) -> Color {
         EnemyKind::Brute => Color::new(0.6, 0.32, 0.9, 1.0),
         EnemyKind::Boss => Color::new(0.95, 0.38, 0.18, 1.0),
         EnemyKind::Add => Color::new(0.64, 0.36, 0.38, 1.0),
+    }
+}
+
+pub fn loot_color(loot: Loot) -> Color {
+    match loot {
+        Loot::Support(_) => Color::new(1.0, 0.84, 0.35, 1.0),
+        Loot::Artifact(_) => Color::new(1.0, 0.55, 0.22, 1.0),
     }
 }
 
@@ -115,6 +122,7 @@ pub struct Fx {
     heal_flash: f32,
     /// Name of the shrine just claimed, and how long to show it.
     pub shrine_banner: Option<(ShrineKind, f32)>,
+    pub loot_banner: Option<(Loot, f32)>,
     rng: Rng,
     time: f32,
 }
@@ -132,6 +140,7 @@ impl Fx {
             barrier_flash: 0.0,
             heal_flash: 0.0,
             shrine_banner: None,
+            loot_banner: None,
             rng: Rng::new(0xF00D),
             time: 0.0,
         }
@@ -267,6 +276,17 @@ impl Fx {
                 }
                 Event::BarrierHit => self.barrier_flash = 0.15,
                 Event::Compacted => self.flash.iter_mut().for_each(|f| *f = 0.0),
+                Event::LootDropped { pos, loot } => {
+                    let pos = v(*pos);
+                    let color = loot_color(*loot);
+                    self.transient(Shape::Ring { pos, from: 10.0, to: 120.0, color, width: 5.0 }, 0.6);
+                    self.burst(pos, 40, 300.0, 4.0, 0.9, color);
+                }
+                Event::LootPicked { loot } => {
+                    let pos = v(world.player.pos);
+                    self.burst(pos, 30, 260.0, 3.5, 0.6, loot_color(*loot));
+                    self.loot_banner = Some((*loot, 2.5));
+                }
                 Event::ShrineClaimed { pos, kind } => {
                     let pos = v(*pos);
                     let color = shrine_color(*kind);
@@ -359,6 +379,12 @@ impl Fx {
                 self.shrine_banner = None;
             }
         }
+        if let Some((_, left)) = &mut self.loot_banner {
+            *left -= dt;
+            if *left <= 0.0 {
+                self.loot_banner = None;
+            }
+        }
     }
 
     pub fn camera(&mut self, world: &World) -> Camera2D {
@@ -402,6 +428,21 @@ pub fn draw_world(world: &World, fx: &Fx, camera: &Camera2D) {
     while y < view.bottom() {
         draw_line(view.x, y, view.right(), y, 1.0, GRID_LINE);
         y += step;
+    }
+
+    // Loot on the ground: a beam you can see from afar.
+    for drop in world.drops.iter().filter(|d| !d.picked) {
+        let p = v(drop.pos);
+        if !view.contains(p) {
+            continue;
+        }
+        let c = loot_color(drop.loot);
+        let pulse = 0.5 + 0.5 * (t * 4.0).sin();
+        draw_rectangle(p.x - 5.0, p.y - 140.0, 10.0, 140.0, with_alpha(c, 0.18 + 0.12 * pulse));
+        draw_rectangle(p.x - 2.0, p.y - 140.0, 4.0, 140.0, with_alpha(c, 0.5));
+        draw_circle(p.x, p.y, 22.0 + 4.0 * pulse, with_alpha(c, 0.18));
+        draw_poly(p.x, p.y, 4, 12.0, 45.0 + t * 90.0, c);
+        draw_poly_lines(p.x, p.y, 4, 16.0, 45.0 - t * 60.0, 2.0, WHITE);
     }
 
     // Shrines.
