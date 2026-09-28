@@ -580,6 +580,36 @@ impl SpellId {
         )
     }
 
+    /// Which neighbors on the bar this spell's effects reach (charge, Haste,
+    /// Empower, Catalyze): (left, right). Whole-bar effects count as neither.
+    pub fn affects_sides(self) -> (bool, bool) {
+        fn walk(list: &[Own], sides: &mut (bool, bool)) {
+            for own in list {
+                match *own {
+                    Own::Charge { scope, .. }
+                    | Own::Haste { scope, .. }
+                    | Own::Empower { scope, .. }
+                    | Own::Catalyze { scope, .. }
+                    | Own::ChargeFraction { scope, .. } => match scope {
+                        Scope::Left => sides.0 = true,
+                        Scope::Right => sides.1 = true,
+                        Scope::Adjacent => *sides = (true, true),
+                        Scope::Bar => {}
+                    },
+                    Own::If(_, inner) => walk(inner, sides),
+                    Own::IfElse(_, a, b) | Own::Alternate(a, b) => {
+                        walk(a, sides);
+                        walk(b, sides);
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let mut sides = (false, false);
+        walk(self.def().own, &mut sides);
+        sides
+    }
+
     pub fn has_area(self) -> bool {
         matches!(
             self.delivery(),
@@ -1212,6 +1242,15 @@ mod tests {
         assert!(build.place_artifact(ArtifactKind::StormBattery, 1));
         assert!(build.place_artifact(ArtifactKind::Bloodstone, 2));
         assert!(!build.place_artifact(ArtifactKind::QuickBoots, 3));
+    }
+
+    #[test]
+    fn side_effects_point_the_right_way() {
+        assert_eq!(SpellId::named("Quickstep").affects_sides(), (false, true));
+        assert_eq!(SpellId::named("Quickstep Sigil").affects_sides(), (true, false));
+        assert_eq!(SpellId::named("Pendulum").affects_sides(), (true, true));
+        assert_eq!(SpellId::named("Acceleration").affects_sides(), (false, false));
+        assert_eq!(SpellId::named("Arcane Bolt").affects_sides(), (false, false));
     }
 
     #[test]

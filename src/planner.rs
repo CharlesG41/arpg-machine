@@ -1,7 +1,7 @@
 //! Planning screens: the skill tree, and the loadout where spells, supports and
 //! artifacts are dragged into place.
-use crate::render::family_color;
-use crate::ui::{Tooltip, Ui, ACCENT, BORDER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
+use crate::render::{family_color, side_arrows};
+use crate::ui::{Tooltip, Ui, ACCENT, BORDER, CARD, CARD_HOVER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
 use arpg_machine::account::{tier_scaling, Account};
 use arpg_machine::character::Character;
 use arpg_machine::content::{presets, ArtifactKind, Build, Family, Loot, SpellId, SupportKind};
@@ -490,9 +490,11 @@ impl Planner {
                 ui.text_scaled("Origin", c.x - tw / 2.0, c.y + 7.0 * z, 20, z, ACCENT);
                 continue;
             };
-            let fill = if is_owned { Color::new(0.17, 0.15, 0.09, 1.0) } else if Some(id) == hovered { PANEL_HOVER } else { PANEL };
+            // Cards are fully opaque so the lines behind them stop at their edges.
+            let fill = if is_owned { Color::new(0.17, 0.15, 0.09, 1.0) } else if Some(id) == hovered { CARD_HOVER } else { CARD };
             draw_rectangle(r.x, r.y, r.w, r.h, fill);
             draw_rectangle(r.x, r.y, 7.0 * z, r.h, family_color(spell.family()));
+            side_arrows(r, spell.affects_sides(), z * 1.6);
             let (border, thick) = if on_route(id) {
                 (route_color, 3.0)
             } else if is_owned {
@@ -849,6 +851,7 @@ impl Planner {
             let hover = r.contains(mouse) && dragging.is_none();
             draw_rectangle(r.x, r.y, r.w, r.h, if hover { PANEL_HOVER } else { PANEL });
             draw_rectangle(r.x, r.y, 5.0, r.h, family_color(spell.family()));
+            side_arrows(r, spell.affects_sides(), 0.75);
             let color = if on_bar { MUTED } else { TEXT };
             ui.text(spell.name(), r.x + 12.0, r.y + 20.0, 16, color);
             let sub = if on_bar { "on the bar".to_string() } else { format!("{} · size {}", spell.delivery().name(), spell.size()) };
@@ -869,6 +872,7 @@ impl Planner {
             let lifted = dragging == Some((Item::Spell(slot.spell), Source::Bar));
             draw_rectangle(r.x, r.y, r.w, r.h, if lifted { Color::new(0.05, 0.05, 0.07, 1.0) } else { PANEL });
             draw_rectangle(r.x, r.y, r.w, 5.0, family_color(slot.spell.family()));
+            side_arrows(Rect::new(r.x, r.y - 20.0, r.w, r.h), slot.spell.affects_sides(), 0.75);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, BORDER);
             let name_color = if lifted { MUTED } else { TEXT };
             ui.wrapped(slot.spell.name(), r.x + 6.0, r.y + 24.0, r.w - 10.0, 15, name_color);

@@ -46,6 +46,24 @@ fn enemy_color(kind: EnemyKind) -> Color {
     }
 }
 
+pub const SIDE_ARROW: Color = Color::new(0.45, 0.82, 1.0, 1.0);
+
+/// Small arrows on a card's edges: this spell charges, hastes or empowers the
+/// neighbor on that side of the bar.
+pub fn side_arrows(r: Rect, sides: (bool, bool), scale: f32) {
+    // Drawn just outside the edge, pointing at the neighbor, so they never cover text.
+    let size = 6.0 * scale;
+    let y = r.y + r.h / 2.0;
+    if sides.0 {
+        let base = r.x - 1.5 * scale;
+        draw_triangle(vec2(base - size, y), vec2(base, y - size), vec2(base, y + size), SIDE_ARROW);
+    }
+    if sides.1 {
+        let base = r.right() + 1.5 * scale;
+        draw_triangle(vec2(base + size, y), vec2(base, y - size), vec2(base, y + size), SIDE_ARROW);
+    }
+}
+
 pub fn loot_color(loot: Loot) -> Color {
     match loot {
         Loot::Support(_) => Color::new(1.0, 0.84, 0.35, 1.0),

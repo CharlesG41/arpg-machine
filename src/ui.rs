@@ -1,11 +1,14 @@
 //! Shared interface helpers, the in-map HUD and the result panel.
-use crate::render::{family_color, loot_color, shrine_color, VIEW_WIDTH};
+use crate::render::{family_color, loot_color, shrine_color, side_arrows, VIEW_WIDTH};
 use arpg_machine::character::Character;
 use arpg_machine::world::{Phase, ShrineKind, World, MOMENTUM_MAX, PROGRESS_NEEDED};
 use macroquad::prelude::*;
 
 pub const PANEL: Color = Color::new(0.08, 0.09, 0.12, 0.94);
 pub const PANEL_HOVER: Color = Color::new(0.13, 0.14, 0.19, 0.96);
+/// Fully opaque card fills, for cards drawn over lines (the skill tree).
+pub const CARD: Color = Color::new(0.08, 0.09, 0.12, 1.0);
+pub const CARD_HOVER: Color = Color::new(0.13, 0.14, 0.19, 1.0);
 pub const BORDER: Color = Color::new(0.25, 0.27, 0.35, 1.0);
 pub const TEXT: Color = Color::new(0.9, 0.92, 0.96, 1.0);
 pub const MUTED: Color = Color::new(0.55, 0.58, 0.66, 1.0);
@@ -243,13 +246,24 @@ pub fn hud(ui: &Ui, world: &World, fx: &crate::render::Fx, show_stats: bool, aut
 
     // Movement slot.
     let dash_frac = 1.0 - world.player.dash_cooldown / world.player.dash_cooldown_max;
-    slot_box(ui, x, y, unit - 6.0, "Dash", "Space", dash_frac, 0.0, Color::new(0.5, 0.85, 1.0, 1.0));
+    slot_box(ui, x, y, unit - 6.0, "Dash", "Space", dash_frac, 0.0, Color::new(0.5, 0.85, 1.0, 1.0), (false, false));
     x += unit + 20.0;
     for (i, slot) in world.build.slots.iter().enumerate() {
         let sw = unit * slot.spell.size() as f32 - 6.0;
         let pulse = fx.cast_pulse.get(i).copied().unwrap_or(0.0);
         let support = slot.support.map_or("", |s| s.name());
-        slot_box(ui, x, y, sw, slot.spell.name(), support, world.slot_ready_fraction(i), pulse, family_color(slot.spell.family()));
+        slot_box(
+            ui,
+            x,
+            y,
+            sw,
+            slot.spell.name(),
+            support,
+            world.slot_ready_fraction(i),
+            pulse,
+            family_color(slot.spell.family()),
+            slot.spell.affects_sides(),
+        );
         x += unit * slot.spell.size() as f32;
     }
 
@@ -336,7 +350,7 @@ fn shrine_arrows(ui: &Ui, world: &World) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn slot_box(ui: &Ui, x: f32, y: f32, w: f32, name: &str, sub: &str, ready: f32, pulse: f32, color: Color) {
+fn slot_box(ui: &Ui, x: f32, y: f32, w: f32, name: &str, sub: &str, ready: f32, pulse: f32, color: Color, sides: (bool, bool)) {
     let h = 80.0;
     draw_rectangle(x, y, w, h, PANEL);
     draw_rectangle(x, y, w, 4.0, color);
@@ -345,6 +359,7 @@ fn slot_box(ui: &Ui, x: f32, y: f32, w: f32, name: &str, sub: &str, ready: f32, 
     if ready < 1.0 {
         draw_rectangle(x, y, w, h * (1.0 - ready), Color::new(0.0, 0.0, 0.0, 0.55));
     }
+    side_arrows(Rect::new(x, y, w, h), sides, 0.9);
     if pulse > 0.0 {
         draw_rectangle_lines(x - 2.0, y - 2.0, w + 4.0, h + 4.0, 3.0, Color::new(color.r, color.g, color.b, pulse / 0.25));
     } else {
