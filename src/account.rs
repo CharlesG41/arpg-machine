@@ -2,6 +2,7 @@
 //! unlocked and the collection of supports and artifacts found. Saved as a
 //! small text file in the home directory.
 use crate::content::{ArtifactKind, Loot, SupportKind, MAX_ARTIFACT_TIER};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -14,11 +15,14 @@ pub struct Account {
     /// their own: two of a tier make one of the next, so a worth of 5 is a
     /// tier-3 copy plus a tier-1 copy, and the artifact is tier 3.
     pub artifacts: Vec<(ArtifactKind, u32)>,
+    /// Spells, supports and artifacts already read ("spell:Name",
+    /// "support:Name", "artifact:Name"): the rest wear a NEW badge.
+    pub seen: BTreeSet<String>,
 }
 
 impl Default for Account {
     fn default() -> Self {
-        Account { max_tier: 1, supports: Vec::new(), artifacts: Vec::new() }
+        Account { max_tier: 1, supports: Vec::new(), artifacts: Vec::new(), seen: BTreeSet::new() }
     }
 }
 
@@ -55,6 +59,9 @@ impl Account {
                         }
                     }
                 }
+                "seen" => {
+                    account.seen.insert(value.to_string());
+                }
                 _ => {}
             }
         }
@@ -68,6 +75,9 @@ impl Account {
         }
         for (a, n) in &self.artifacts {
             out += &format!("artifact={}:{}\n", a.name(), n);
+        }
+        for key in &self.seen {
+            out += &format!("seen={key}\n");
         }
         out
     }
@@ -114,6 +124,15 @@ impl Account {
     pub fn artifact_progress(&self, artifact: ArtifactKind) -> Option<(u32, u32)> {
         let tier = self.artifact_tier(artifact);
         (tier > 0 && tier < MAX_ARTIFACT_TIER).then(|| (self.artifact_worth(artifact), 1 << tier))
+    }
+
+    pub fn is_seen(&self, key: &str) -> bool {
+        self.seen.contains(key)
+    }
+
+    /// Returns true if the key was new.
+    pub fn mark_seen(&mut self, key: String) -> bool {
+        self.seen.insert(key)
     }
 
     /// Artifacts already legendary: more copies would be wasted, so they no
@@ -198,6 +217,8 @@ mod tests {
         account.add(Loot::Artifact(ArtifactKind::SagesRing, 1));
         account.add(Loot::Artifact(ArtifactKind::SagesRing, 1));
         assert_eq!(account.artifact_worth(ArtifactKind::SagesRing), 2);
+        assert!(account.mark_seen("spell:Arcane Bolt".into()));
+        assert!(!account.mark_seen("spell:Arcane Bolt".into()));
         assert_eq!(Account::parse(&account.to_text()), account);
         assert_eq!(Account::parse("garbage"), Account::default());
     }

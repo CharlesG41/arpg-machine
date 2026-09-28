@@ -610,6 +610,82 @@ impl SpellId {
         sides
     }
 
+    /// A few words for the card, read at a glance: its shape, what it scales
+    /// with, and its key effects ("Nova · AP · Poison", "Haste right"). The
+    /// full text stays in the tooltip. Most important part first, so callers
+    /// can drop parts from the end to fit.
+    pub fn tagline(self) -> Vec<String> {
+        let def = self.def();
+        let mut hits = Vec::new();
+        flatten_hits(def.hits, &mut hits);
+        let mut own = Vec::new();
+        flatten_own(def.own, &mut own);
+        let mut parts: Vec<String> = Vec::new();
+        let push = |parts: &mut Vec<String>, word: String| {
+            if !parts.contains(&word) {
+                parts.push(word);
+            }
+        };
+        if self.hits_enemies() {
+            let shape = match def.delivery {
+                Delivery::Projectile { count, .. } if count > 1 => "Volley",
+                Delivery::Projectile { .. } => "Bolt",
+                other => other.name(),
+            };
+            push(&mut parts, shape.to_string());
+            let (mut ad, mut ap, mut other) = (0.0, 0.0, None);
+            for h in &hits {
+                let scale = match h {
+                    Hit::Damage { scale, .. } | Hit::Bleed { scale, .. } | Hit::ConsumeChill(scale) => Some(*scale),
+                    Hit::ConsumeBurn { scale, .. } | Hit::ConsumePoison { scale, .. } => Some(*scale),
+                    Hit::Reserve { per, .. } | Hit::PerCount { per, .. } => Some(*per),
+                    Hit::FromBarrier { .. } => {
+                        other = other.or(Some("Barrier"));
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(sc) = scale {
+                    ad += sc.ad;
+                    ap += sc.ap;
+                    if sc.max_hp > 0.0 {
+                        other = other.or(Some("HP"));
+                    } else if sc.armor > 0.0 {
+                        other = other.or(Some("PR"));
+                    } else if sc.mr > 0.0 {
+                        other = other.or(Some("MR"));
+                    }
+                }
+            }
+            let scaling = match (ad > 0.0, ap > 0.0) {
+                (true, true) => Some("AD+AP"),
+                (true, false) => Some("AD"),
+                (false, true) => Some("AP"),
+                _ => other,
+            };
+            if let Some(scaling) = scaling {
+                push(&mut parts, scaling.to_string());
+            }
+            for h in &hits {
+                if let Some(word) = hit_word(h) {
+                    push(&mut parts, word.to_string());
+                }
+            }
+            if def.growth > 0.0 {
+                push(&mut parts, "Ramps".to_string());
+            }
+        }
+        for o in &own {
+            if let Some(word) = own_word(o) {
+                push(&mut parts, word);
+            }
+        }
+        if parts.is_empty() {
+            parts.push(self.delivery().name().to_string());
+        }
+        parts
+    }
+
     pub fn has_area(self) -> bool {
         matches!(
             self.delivery(),
@@ -803,6 +879,127 @@ fn own_text(own: Own) -> String {
             format!("Charge {} by {:.0}% of its remaining cooldown.", scope.phrase(), fraction * 100.0)
         }
     }
+}
+
+fn flatten_hits<'a>(hits: &'a [Hit], out: &mut Vec<&'a Hit>) {
+    for h in hits {
+        out.push(h);
+        if let Hit::IfTarget(_, yes, no) = h {
+            flatten_hits(yes, out);
+            flatten_hits(no, out);
+        }
+    }
+}
+
+fn flatten_own<'a>(own: &'a [Own], out: &mut Vec<&'a Own>) {
+    for o in own {
+        match o {
+            Own::If(_, inner) => flatten_own(inner, out),
+            Own::IfElse(_, a, b) | Own::Alternate(a, b) => {
+                flatten_own(a, out);
+                flatten_own(b, out);
+            }
+            _ => out.push(o),
+        }
+    }
+}
+
+/// The key effect of a hit, in a word or two.
+fn hit_word(h: &Hit) -> Option<&'static str> {
+    if let Hit::Reserve { kind, .. } = h {
+        return Some(match kind {
+            ReserveKind::OtherCasts | ReserveKind::SmallCasts => "Counts casts",
+            ReserveKind::BurnConsumed => "Stores Burn",
+            ReserveKind::BarrierAbsorbed => "Stores blocks",
+            ReserveKind::BarrierGained => "Stores Barrier",
+            ReserveKind::HealthPaid => "Stores HP paid",
+            ReserveKind::Healing => "Stores heals",
+            ReserveKind::PoisonDamage => "Stores Poison",
+        });
+    }
+    if let Hit::PerCount { count, .. } = h {
+        return Some(match count {
+            Count::Artifacts => "Per artifact",
+            Count::DistinctFamilies => "Per family",
+            Count::EmptySlots => "Per empty slot",
+            Count::MarksOnTarget => "Per mark",
+            Count::TargetStacks => "Per stack",
+            Count::Nearby(_) => "Per nearby foe",
+            Count::CoolingSpells => "Per cooling spell",
+        });
+    }
+    Some(match h {
+        Hit::Burn(_) | Hit::BurnIfBurning(_) => "Burn",
+        Hit::Poison(_) => "Poison",
+        Hit::Chill(_) => "Chill",
+        Hit::Freeze(_) => "Freeze",
+        Hit::Bleed { .. } => "Bleed",
+        Hit::ShredArmor(_) => "Shred PR",
+        Hit::ShredMr(_) => "Shred MR",
+        Hit::Weaken(_) => "Weaken",
+        Hit::PoisonAmp(_) => "Poison amp",
+        Hit::ConsumeChill(_) => "Shatter",
+        Hit::ConsumeBurn { .. } => "Eats Burn",
+        Hit::ConsumePoison { .. } => "Eats Poison",
+        Hit::SpreadBurn { .. } => "Spreads Burn",
+        Hit::Mark(..) => "Mark",
+        Hit::Lifesteal(_) => "Lifesteal",
+        Hit::HealOnKill(_) => "Heal on kill",
+        Hit::EliteBonus(_) => "Vs elites",
+        Hit::IfTarget(TargetCond::BelowHealth(_), ..) => "Execute",
+        _ => return None,
+    })
+}
+
+fn side_word(scope: Scope) -> &'static str {
+    match scope {
+        Scope::Left => "left",
+        Scope::Right => "right",
+        Scope::Adjacent => "sides",
+        Scope::Bar => "bar",
+    }
+}
+
+fn short_stat(stat: Stat) -> &'static str {
+    match stat {
+        Stat::Ad => "AD",
+        Stat::Ap => "AP",
+        Stat::Armor => "PR",
+        Stat::Mr => "MR",
+        Stat::DamagePct => "dmg",
+        Stat::DamageReduction => "DR",
+        Stat::HealingPct => "healing",
+        Stat::HealToBarrier => "Barrier",
+        Stat::MaxHp => "HP",
+        Stat::MoveSpeedPct => "speed",
+        Stat::CooldownPct => "CD rate",
+    }
+}
+
+/// What an effect on you does, in a word or two.
+fn own_word(o: &Own) -> Option<String> {
+    Some(match o {
+        Own::Barrier(_)
+        | Own::BarrierPer { .. }
+        | Own::BarrierFromRecent { .. }
+        | Own::PayForBarrier { .. } => "Barrier".into(),
+        Own::Heal(_)
+        | Own::HealPer { .. }
+        | Own::HealFromReserve { .. }
+        | Own::HealFromRecent { .. }
+        | Own::Regen { .. }
+        | Own::ConsumeBarrier { .. } => "Heal".into(),
+        Own::Buff { stat, .. } => format!("+{}", short_stat(*stat)),
+        Own::Haste { scope, .. } => format!("Haste {}", side_word(*scope)),
+        Own::Charge { scope, .. } | Own::ChargeFraction { scope, .. } => format!("Charge {}", side_word(*scope)),
+        Own::ChargeNearestReady(_) => "Charge next".into(),
+        Own::Empower { scope, .. } => format!("Empower {}", side_word(*scope)),
+        Own::Catalyze { scope, .. } => format!("Catalyze {}", side_word(*scope)),
+        Own::Thorns { .. } => "Thorns".into(),
+        Own::Grow { stat, .. } => format!("Grows {}", short_stat(*stat)),
+        Own::PayHealth(_) => "Costs HP".into(),
+        Own::If(..) | Own::IfElse(..) | Own::Alternate(..) => return None,
+    })
 }
 
 fn stat_name(stat: Stat) -> &'static str {
@@ -1401,6 +1598,17 @@ mod tests {
         assert_eq!(ArtifactKind::ChainLink.value(3), 2.0);
         assert!(ArtifactKind::ChainLink.description(5).contains("3 more times"));
         assert!(ArtifactKind::ALL.iter().enumerate().all(|(i, a)| a.index() == i));
+    }
+
+    #[test]
+    fn every_spell_has_a_short_tagline() {
+        for spell in SpellId::all() {
+            let tag = spell.tagline();
+            assert!(!tag.is_empty(), "{}", spell.name());
+            assert!(tag[0].len() <= 16, "{}: {:?}", spell.name(), tag);
+        }
+        assert_eq!(SpellId::named("Quickstep").tagline(), vec!["Charge right"]);
+        assert_eq!(SpellId::named("Venom Fang").tagline(), vec!["Bolt", "AD", "Poison"]);
     }
 
     #[test]

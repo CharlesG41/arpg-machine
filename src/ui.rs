@@ -52,6 +52,13 @@ impl Ui {
     }
 
     /// Splits text into lines that fit `max_w`.
+    /// The largest size from `size` down to `min` at which every word of `s`
+    /// fits in `max_w` (so wrapping never leaves a word sticking out).
+    pub fn fit_size(&self, s: &str, max_w: f32, size: u16, min: u16) -> u16 {
+        let widest = |sz| s.split_whitespace().map(|w| self.width(w, sz)).fold(0.0, f32::max);
+        (min..=size).rev().find(|&sz| widest(sz) <= max_w).unwrap_or(min)
+    }
+
     /// Word-wraps `s`; a newline starts a new line, and an empty line stays
     /// as a gap.
     pub fn wrap_lines(&self, s: &str, max_w: f32, size: u16) -> Vec<String> {

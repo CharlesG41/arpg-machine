@@ -85,12 +85,28 @@ cargo run --release --example catalogue
   n'écrivent la sauvegarde ni le compte.
 - **Découverte de l'arbre** : on ne voit que ses nœuds et ceux juste à côté ;
   les nœuds encore cachés juste au-delà apparaissent comme des cartes « ? ».
+- **Résumé sur chaque carte** : une ligne générée à partir des données du
+  sort remplace « famille · livraison » dans l'arbre, la liste et la barre :
+  sa forme (Bolt, Volley, Chain, Nova, Cone, Blast, Zone, Orbit), ce qui le
+  fait scaler (AD, AP, AD+AP, PR, MR, HP) et ses effets clés (Burn, Poison,
+  Shred PR, Charge right, Haste bar, Barrier, Stores Burn, Per family…).
+  Quand la carte est trop étroite, les derniers mots tombent. Le texte complet
+  reste au survol. `cargo run --release --example taglines` les liste tous.
+- **NEW** : un badge vert marque chaque sort visible dans l'arbre, et chaque
+  support ou artefact trouvé, que tu n'as pas encore lu ; « UP » marque un
+  artefact qui a fusionné depuis. Survoler une carte une demi-seconde (ou
+  acheter le sort) la compte comme lue. Le compte s'en souvient
+  (`seen=` dans `account.txt`), pour tous les personnages. Une pastille sur
+  chaque onglet compte ce qui reste à lire. Les comptes d'avant comptent ce
+  qu'ils possèdent déjà comme lu.
 - **Taille des cartes** : une carte de taille 2 est 1,25 fois plus large
   qu'une de taille 1, et une de taille 3 1,5 fois (arbre, listes, barre en
   map). La taille se lit aussi aux **barres blanches sur le bord du haut** :
-  une par point de taille. La barre de sorts et la barre d'artefacts du
-  Loadout restent proportionnelles, parce qu'elles montrent la capacité
-  utilisée. Les listes placent chaque carte dans la première rangée de sa
+  une par point de taille. La barre de sorts du Loadout suit la même règle :
+  la capacité libre s'affiche en slots vides à la fin, et les cartes se
+  partagent la place (un nom trop long rapetisse au lieu de déborder). La
+  barre d'artefacts reste proportionnelle, mais ses slots rétrécissent pour
+  tenir jusqu'à 7 de capacité. Les listes placent chaque carte dans la première rangée de sa
   famille où elle entre. Au moins 4
   des 6 sorties de l'Origin font des dégâts.
 - **Skill tree** généré à partir d'une seed, sur le modèle de God Tower : une

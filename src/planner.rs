@@ -75,7 +75,8 @@ const BAR_X: f32 = 530.0;
 const BAR_Y: f32 = 150.0;
 const BAR_H: f32 = 132.0;
 const ART_Y: f32 = 350.0;
-const ART_UNIT: f32 = 108.0;
+/// Widest an artifact slot gets; with more capacity, slots shrink to fit.
+const ART_UNIT_MAX: f32 = 108.0;
 const ART_H: f32 = 96.0;
 
 /// Lays cards out in rows of `cols` units; a card of size n is n units wide
@@ -102,6 +103,49 @@ fn pack<G: PartialEq + Copy>(items: &[(G, u8)], x0: f32, y0: f32, unit: f32, gap
             Rect::new(x0 + used * unit, y0 + row as f32 * row_h, width * unit - gap, card_h)
         })
         .collect()
+}
+
+/// Debug: the level for `demo_collection` (ARPG_LEVEL).
+fn env_level() -> Option<u32> {
+    std::env::var("ARPG_LEVEL").ok()?.parse().ok()
+}
+
+/// What the account remembers having read, per item.
+fn spell_key(spell: SpellId) -> String {
+    format!("spell:{}", spell.name())
+}
+
+fn support_key(support: SupportKind) -> String {
+    format!("support:{}", support.name())
+}
+
+/// An artifact is new again each time it reaches a higher tier.
+fn artifact_key(artifact: ArtifactKind, tier: u8) -> String {
+    format!("artifact:{}:{}", artifact.name(), tier)
+}
+
+/// The spell's tagline, dropping parts from the end until it fits.
+fn tagline_fit(ui: &Ui, spell: SpellId, max_w: f32, size: u16) -> String {
+    let mut parts = spell.tagline();
+    loop {
+        let text = parts.join(" · ");
+        if parts.len() <= 1 || ui.width(&text, size) <= max_w {
+            return text;
+        }
+        parts.pop();
+    }
+}
+
+/// Hovering a card this long counts as reading it.
+const READ_DWELL: f32 = 0.45;
+
+/// A small badge on a card's top-left edge ("NEW", "UP").
+fn badge(ui: &Ui, r: Rect, text: &str, scale: f32) {
+    let (w, h) = ((ui.width(text, 11) + 10.0) * scale, 15.0 * scale);
+    let (x, y) = (r.x + 10.0 * scale, r.y - h / 2.0);
+    draw_rectangle(x - 1.5, y - 1.5, w + 3.0, h + 3.0, Color::new(0.02, 0.02, 0.03, 1.0));
+    draw_rectangle(x, y, w, h, Color::new(0.35, 0.9, 0.45, 1.0));
+    ui.text_scaled(text, x + 5.0 * scale, y + 11.5 * scale, 11, scale, Color::new(0.02, 0.1, 0.03, 1.0));
 }
 
 fn v2(p: V2) -> Vec2 {
@@ -131,6 +175,8 @@ pub struct Planner {
     /// Index in `BOSSES` of the boss the next map ends with. Beating it
     /// brings the next one; losing means the same boss again.
     pub next_boss: usize,
+    /// The card hovered right now and for how long (reading it).
+    dwell: Option<(String, f32)>,
 }
 
 impl Planner {
@@ -158,6 +204,7 @@ impl Planner {
             list_scroll: 0.0,
             family_filter: None,
             next_boss: 0,
+            dwell: None,
         }
     }
 
@@ -274,10 +321,14 @@ impl Planner {
         self.account.add(Loot::Artifact(ArtifactKind::ChainLink, MAX_ARTIFACT_TIER));
         self.sandbox = false;
         self.build.artifacts.clear();
-        self.character.level = 12;
+        self.character.level = env_level().unwrap_or(12);
         self.sync_character();
         self.build.place_artifact(ArtifactKind::ChainLink, 0);
         self.build.place_artifact(ArtifactKind::VenomGland, 1);
+        for a in [ArtifactKind::MomentumEngine, ArtifactKind::Warband, ArtifactKind::IronPlate, ArtifactKind::SoulSiphon] {
+            let end = self.build.artifacts.len();
+            self.build.place_artifact(a, end);
+        }
         self.build.socket_artifact(ArtifactKind::ChainLink, SupportKind::Pierce);
         self.tab = Tab::Loadout;
     }
@@ -321,6 +372,57 @@ impl Planner {
             .with_maxed_artifacts(self.account.maxed_artifacts())
     }
 
+    fn new_spell(&self, spell: SpellId) -> bool {
+        !self.account.is_seen(&spell_key(spell))
+    }
+
+    fn new_support(&self, support: SupportKind) -> bool {
+        self.account.has_support(support) && !self.account.is_seen(&support_key(support))
+    }
+
+    /// "NEW" for a first copy, "UP" after a fusion, None once read.
+    fn artifact_badge(&self, artifact: ArtifactKind) -> Option<&'static str> {
+        let tier = self.account.artifact_tier(artifact);
+        if tier == 0 || self.account.is_seen(&artifact_key(artifact, tier)) {
+            return None;
+        }
+        // Read at a lower tier before: it fused up.
+        let prefix = format!("artifact:{}:", artifact.name());
+        let known = self.account.seen.iter().any(|k| k.starts_with(&prefix));
+        Some(if known { "UP" } else { "NEW" })
+    }
+
+    /// Unread cards on each tab, for the tab labels.
+    fn unread(&self) -> (usize, usize) {
+        let tree = (0..self.tree.nodes.len())
+            .filter(|&i| self.tree.visible(i))
+            .filter_map(|i| self.tree.nodes[i].spell)
+            .filter(|&s| self.new_spell(s))
+            .count();
+        let loadout = SupportKind::ALL.into_iter().filter(|&s| self.new_support(s)).count()
+            + ArtifactKind::ALL.into_iter().filter(|&a| self.artifact_badge(a).is_some()).count();
+        (tree, loadout)
+    }
+
+    /// Call every frame with the card under the mouse: hovering one long
+    /// enough marks it read.
+    fn read(&mut self, key: Option<String>) {
+        let Some(key) = key else {
+            self.dwell = None;
+            return;
+        };
+        let t = match &self.dwell {
+            Some((k, t)) if *k == key => t + get_frame_time(),
+            _ => 0.0,
+        };
+        if t >= READ_DWELL {
+            if self.account.mark_seen(key.clone()) {
+                self.save_account();
+            }
+        }
+        self.dwell = Some((key, t));
+    }
+
     /// A message at the bottom of the screen; messages arriving together chain.
     fn say(&mut self, message: &str) {
         self.notice = match self.notice.take() {
@@ -341,6 +443,16 @@ impl Planner {
         planner.next_boss = save.next_boss % BOSSES.len();
         planner.sync_character();
         planner.tab = if planner.build.slots.is_empty() { Tab::Tree } else { Tab::Loadout };
+        // Accounts from before NEW badges: what you own counts as read.
+        if planner.account.seen.is_empty() {
+            let mut keys: Vec<String> = planner.tree.acquired_spells().into_iter().map(spell_key).collect();
+            keys.extend(planner.account.supports.iter().map(|&s| support_key(s)));
+            keys.extend(planner.account.artifacts.iter().map(|&(a, _)| artifact_key(a, planner.account.artifact_tier(a))));
+            for key in keys {
+                planner.account.mark_seen(key);
+            }
+            planner.save_account();
+        }
         planner
     }
 
@@ -422,14 +534,27 @@ impl Planner {
         draw_rectangle(0.0, 0.0, w, HEADER, Color::new(0.045, 0.05, 0.068, 0.98));
         draw_line(0.0, HEADER, w, HEADER, 1.0, BORDER);
         ui.text("ARPG Machine", 24.0, 46.0, 30, TEXT);
-        if ui.button(Rect::new(240.0, 20.0, 150.0, 38.0), "Skill Tree", true, self.tab == Tab::Tree) {
+        let (tree_new, loadout_new) = self.unread();
+        let (tree_tab, loadout_tab) = (Rect::new(240.0, 20.0, 150.0, 38.0), Rect::new(400.0, 20.0, 150.0, 38.0));
+        if ui.button(tree_tab, "Skill Tree", true, self.tab == Tab::Tree) {
             self.tab = Tab::Tree;
         }
-        if ui.button(Rect::new(400.0, 20.0, 150.0, 38.0), "Loadout", true, self.tab == Tab::Loadout) {
+        if ui.button(loadout_tab, "Loadout", true, self.tab == Tab::Loadout) {
             self.tab = Tab::Loadout;
         }
         if is_key_pressed(KeyCode::Tab) {
             self.tab = if self.tab == Tab::Tree { Tab::Loadout } else { Tab::Tree };
+        }
+        // Unread cards on each tab: a green count on its corner.
+        for (tab, n) in [(tree_tab, tree_new), (loadout_tab, loadout_new)] {
+            if n > 0 {
+                let text = n.to_string();
+                let w = (ui.width(&text, 13) + 10.0).max(20.0);
+                let (x, y) = (tab.right() - w + 6.0, tab.y - 8.0);
+                draw_rectangle(x - 1.5, y - 1.5, w + 3.0, 21.0, Color::new(0.02, 0.02, 0.03, 1.0));
+                draw_rectangle(x, y, w, 18.0, Color::new(0.35, 0.9, 0.45, 1.0));
+                ui.text(&text, x + (w - ui.width(&text, 13)) / 2.0, y + 14.0, 13, Color::new(0.02, 0.1, 0.03, 1.0));
+            }
         }
         // Map tier: like Diablo's difficulties, unlocked one by one by beating the boss.
         self.tier = self.tier.clamp(1, self.account.max_tier);
@@ -526,6 +651,7 @@ impl Planner {
         } else {
             None
         };
+        self.read(hovered.and_then(|id| self.tree.nodes[id].spell).map(spell_key));
         let route = hovered.and_then(|id| self.tree.route_to(id)).unwrap_or_default();
         let affordable = route.len() as u32 <= self.tree.remaining();
 
@@ -640,6 +766,9 @@ impl Planner {
             };
             draw_rectangle_lines(r.x, r.y, r.w, r.h, thick, border);
             size_pips(r, spell.size(), z * 1.6);
+            if self.new_spell(spell) {
+                badge(ui, r, "NEW", z * 1.6);
+            }
             // Long names wrap onto a second line.
             let name_color = if is_owned { TEXT } else { Color::new(0.78, 0.8, 0.86, 1.0) };
             let inner = r.w / z - 28.0;
@@ -648,10 +777,10 @@ impl Planner {
                 ui.text_scaled(line, r.x + 14.0 * z, r.y + (32.0 + 24.0 * k as f32) * z, 22, z, name_color);
             }
             if z > 0.24 {
-                let full = format!("{} · {}", spell.family().name(), spell.delivery().name());
-                let line = if ui.width(&full, 16) <= inner { full } else { spell.delivery().name().to_string() };
-                let y = if lines.len() > 1 { 84.0 } else { 62.0 };
-                ui.text_scaled(&line, r.x + 16.0 * z, r.y + y * z, 16, z, MUTED);
+                // What it does, at a glance; the full text is on hover.
+                let line = tagline_fit(ui, spell, inner, 17);
+                let y = if lines.len() > 1 { 84.0 } else { 64.0 };
+                ui.text_scaled(&line, r.x + 16.0 * z, r.y + y * z, 17, z, Color::new(0.75, 0.82, 0.95, 1.0));
             }
             if self.build.contains(spell) {
                 ui.text_scaled("ON BAR", r.right() - 62.0 * z, r.bottom() - 8.0 * z, 14, z, GOOD);
@@ -726,6 +855,12 @@ impl Planner {
             return;
         }
         if self.tree.acquire(id) {
+            for &n in &route {
+                if let Some(s) = self.tree.nodes[n].spell {
+                    self.account.mark_seen(spell_key(s));
+                }
+            }
+            self.save_account();
             let spells: Vec<&str> = route.iter().filter_map(|&n| self.tree.nodes[n].spell).map(|s| s.name()).collect();
             self.say(&format!("Learned {}.", spells.join(", ")));
         } else {
@@ -744,6 +879,12 @@ impl Planner {
     /// The visible part of the spell collection; cards outside it are hidden.
     fn list_area() -> Rect {
         Rect::new(COLLECTION_X, SPELLS_Y - 4.0, 3.0 * 162.0, screen_height() - SPELLS_Y - 16.0)
+    }
+
+    /// Width of one artifact slot: the bar fits between the collection and
+    /// the supports, whatever the capacity (2 to 7).
+    fn art_unit(&self) -> f32 {
+        ((Self::right_x() - 30.0 - BAR_X) / self.build.artifact_capacity.max(1) as f32).min(ART_UNIT_MAX)
     }
 
     fn right_x() -> f32 {
@@ -769,8 +910,18 @@ impl Planner {
     }
 
     /// Width of one spell-bar slot: the bar fits between the collection and the supports.
+    /// Room for the spell bar, between the collection and the supports.
+    fn bar_room() -> f32 {
+        Self::right_x() - 30.0 - BAR_X
+    }
+
+    /// Width of a size-1 card on the spell bar. Cards are as wide as
+    /// everywhere else (×1, ×1.25, ×1.5 by size); free capacity shows as
+    /// size-1 empty slots, and everything shares the room.
     fn bar_unit(&self) -> f32 {
-        ((Self::right_x() - 30.0 - BAR_X) / self.build.capacity as f32).min(90.0)
+        let cards: f32 = self.build.slots.iter().map(|s| size_scale(s.spell.size())).sum();
+        let free = self.build.capacity.saturating_sub(self.build.used()) as f32;
+        (Self::bar_room() / (cards + free).max(1.0)).min(120.0)
     }
 
     fn bar_slot_rects(&self) -> Vec<Rect> {
@@ -780,8 +931,9 @@ impl Planner {
             .slots
             .iter()
             .map(|s| {
-                let r = Rect::new(x, BAR_Y, s.spell.size() as f32 * unit - 8.0, BAR_H);
-                x += s.spell.size() as f32 * unit;
+                let w = size_scale(s.spell.size()) * unit;
+                let r = Rect::new(x, BAR_Y, w - 8.0, BAR_H);
+                x += w;
                 r
             })
             .collect()
@@ -809,24 +961,25 @@ impl Planner {
     }
 
     fn artifact_slot_rects(&self) -> Vec<Rect> {
+        let unit = self.art_unit();
         let mut x = BAR_X;
         self.build
             .artifacts
             .iter()
             .map(|a| {
-                let r = Rect::new(x, ART_Y, a.size() as f32 * ART_UNIT - 8.0, ART_H);
-                x += a.size() as f32 * ART_UNIT;
+                let r = Rect::new(x, ART_Y, a.size() as f32 * unit - 8.0, ART_H);
+                x += a.size() as f32 * unit;
                 r
             })
             .collect()
     }
 
     fn bar_zone(&self) -> Rect {
-        Rect::new(BAR_X - 24.0, BAR_Y - 34.0, self.build.capacity as f32 * self.bar_unit() + 48.0, BAR_H + 60.0)
+        Rect::new(BAR_X - 24.0, BAR_Y - 34.0, Self::bar_room() + 48.0, BAR_H + 60.0)
     }
 
     fn artifact_zone(&self) -> Rect {
-        Rect::new(BAR_X - 24.0, ART_Y - 34.0, self.build.artifact_capacity as f32 * ART_UNIT + 48.0, ART_H + 60.0)
+        Rect::new(BAR_X - 24.0, ART_Y - 34.0, self.build.artifact_capacity as f32 * self.art_unit() + 48.0, ART_H + 60.0)
     }
 
     /// Insertion index for a drop at `x` among cards laid out in `rects`.
@@ -1026,6 +1179,11 @@ impl Planner {
         }
         self.list_scroll = self.list_scroll.clamp(0.0, max_scroll);
         let hovered = if dragging.is_none() { self.pick(mouse) } else { None };
+        self.read(hovered.map(|(item, _)| match item {
+            Item::Spell(s) => spell_key(s),
+            Item::Support(s) => support_key(s),
+            Item::Artifact(a) => artifact_key(a, self.account.artifact_tier(a)),
+        }));
 
         // Spell collection.
         let title = if self.sandbox { format!("All spells ({})", available.len()) } else { format!("Your spells ({})", available.len()) };
@@ -1052,21 +1210,26 @@ impl Planner {
             draw_rectangle(r.x, r.y, 5.0, r.h, family_color(spell.family()));
             side_arrows(r, spell.affects_sides(), 0.75);
             size_pips(r, spell.size(), 0.8);
+            if !self.sandbox && self.new_spell(*spell) {
+                badge(ui, r, "NEW", 1.0);
+            }
             let color = if on_bar { MUTED } else { TEXT };
             ui.text(spell.name(), r.x + 12.0, r.y + 20.0, 16, color);
-            let sub = if on_bar { "on the bar".to_string() } else { format!("{} · {}", spell.family().name(), spell.delivery().name()) };
-            ui.text(&sub, r.x + 12.0, r.y + 37.0, 13, if on_bar { GOOD } else { MUTED });
+            let sub = if on_bar { "on the bar".to_string() } else { tagline_fit(ui, *spell, r.w - 20.0, 13) };
+            ui.text(&sub, r.x + 12.0, r.y + 37.0, 13, if on_bar { GOOD } else { Color::new(0.7, 0.77, 0.9, 1.0) });
         }
 
         // Spell bar.
         ui.text(&format!("Spell bar ({} / {})", self.build.used(), self.build.capacity), BAR_X, BAR_Y - 16.0, 20, ACCENT);
         ui.text("casts left to right · Echo reads its left neighbor", BAR_X + 190.0, BAR_Y - 16.0, 14, MUTED);
         let unit = self.bar_unit();
-        for k in 0..self.build.capacity {
-            let r = Rect::new(BAR_X + k as f32 * unit, BAR_Y, unit - 8.0, BAR_H);
+        let slot_rects = self.bar_slot_rects();
+        // Free capacity: one empty slot per point left.
+        let free_x = slot_rects.last().map_or(BAR_X, |r| r.right() + 8.0);
+        for k in 0..self.build.capacity.saturating_sub(self.build.used()) {
+            let r = Rect::new(free_x + k as f32 * unit, BAR_Y, unit - 8.0, BAR_H);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.18, 0.19, 0.24, 1.0));
         }
-        let slot_rects = self.bar_slot_rects();
         for (i, r) in slot_rects.iter().enumerate() {
             let slot = self.build.slots[i];
             let lifted = dragging == Some((Item::Spell(slot.spell), Source::Bar));
@@ -1076,8 +1239,12 @@ impl Planner {
             size_pips(*r, slot.spell.size(), 0.8);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, BORDER);
             let name_color = if lifted { MUTED } else { TEXT };
-            ui.wrapped(slot.spell.name(), r.x + 6.0, r.y + 24.0, r.w - 10.0, 15, name_color);
-            ui.text(slot.spell.family().name(), r.x + 8.0, r.y + 72.0, 13, MUTED);
+            let size = ui.fit_size(slot.spell.name(), r.w - 12.0, 15, 11);
+            ui.wrapped(slot.spell.name(), r.x + 6.0, r.y + 24.0, r.w - 12.0, size, name_color);
+            let tag = slot.spell.tagline().join(" · ");
+            for (k, line) in ui.wrap_lines(&tag, r.w - 12.0, 12).iter().take(2).enumerate() {
+                ui.text(line, r.x + 8.0, r.y + 64.0 + k as f32 * 14.0, 12, Color::new(0.7, 0.77, 0.9, 1.0));
+            }
             // Socket.
             let s = Self::socket_rect(*r);
             let highlight = match dragging {
@@ -1088,7 +1255,7 @@ impl Planner {
             draw_rectangle_lines(s.x, s.y, s.w, s.h, if highlight.is_some() { 2.0 } else { 1.0 }, highlight.unwrap_or(BORDER));
             match slot.support {
                 Some(sup) if dragging != Some((Item::Support(sup), Source::Socket)) => {
-                    ui.text(sup.name(), s.x + 4.0, s.y + 23.0, 12, ACCENT)
+                    ui.text(sup.name(), s.x + 4.0, s.y + 23.0, ui.fit_size(sup.name(), s.w - 8.0, 12, 9), ACCENT)
                 }
                 _ => ui.text("support", s.x + 6.0, s.y + 23.0, 13, Color::new(0.35, 0.37, 0.44, 1.0)),
             }
@@ -1110,7 +1277,7 @@ impl Planner {
             ACCENT,
         );
         for k in 0..self.build.artifact_capacity {
-            let r = Rect::new(BAR_X + k as f32 * ART_UNIT, ART_Y, ART_UNIT - 8.0, ART_H);
+            let r = Rect::new(BAR_X + k as f32 * self.art_unit(), ART_Y, self.art_unit() - 8.0, ART_H);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.18, 0.19, 0.24, 1.0));
         }
         let art_rects = self.artifact_slot_rects();
@@ -1123,8 +1290,14 @@ impl Planner {
             size_pips(*r, a.size(), 0.8);
             let legendary = self.build.is_legendary(a);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, if legendary { 2.0 } else { 1.0 }, if legendary { tier_color(tier) } else { Color::new(0.5, 0.4, 0.2, 1.0) });
-            ui.wrapped(a.name(), r.x + 8.0, r.y + 22.0, r.w - 16.0, 15, if lifted { MUTED } else { TEXT });
-            let label_y = if legendary && a.has_legendary_socket() { r.y + 60.0 } else { r.y + 66.0 };
+            let size = ui.fit_size(a.name(), r.w - 16.0, 15, 11);
+            let name_end = ui.wrapped(a.name(), r.x + 8.0, r.y + 22.0, r.w - 16.0, size, if lifted { MUTED } else { TEXT });
+            // Under the name, above the socket when there is one.
+            let label_y = if legendary && a.has_legendary_socket() {
+                (name_end + 2.0).min(r.bottom() - 30.0)
+            } else {
+                (name_end + 6.0).max(r.y + 66.0)
+            };
             ui.text(&tier_label(tier), r.x + 8.0, label_y, 12, tier_color(tier));
             if legendary && a.has_legendary_socket() {
                 let s = Self::artifact_socket_rect(*r);
@@ -1188,6 +1361,9 @@ impl Planner {
             let fill = if !owned { Color::new(0.05, 0.055, 0.07, 0.9) } else if hover { PANEL_HOVER } else { PANEL };
             draw_rectangle(r.x, r.y, r.w, r.h, fill);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, BORDER);
+            if self.new_support(s) {
+                badge(ui, r, "NEW", 1.0);
+            }
             let dim = Color::new(0.35, 0.37, 0.44, 1.0);
             ui.text(s.name(), r.x + 12.0, r.y + 21.0, 17, if !owned { dim } else if used_on.is_some() { MUTED } else { TEXT });
             let sub = if !owned {
@@ -1218,6 +1394,9 @@ impl Planner {
             draw_rectangle(r.x, r.y, r.w, r.h, fill);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.35, 0.3, 0.2, 1.0));
             size_pips(r, a.size(), 0.8);
+            if let Some(text) = self.artifact_badge(a) {
+                badge(ui, r, text, 1.0);
+            }
             let dim = Color::new(0.35, 0.33, 0.3, 1.0);
             ui.text(a.name(), r.x + 8.0, r.y + 20.0, 14, if !owned { dim } else if equipped { MUTED } else { TEXT });
             if owned {
