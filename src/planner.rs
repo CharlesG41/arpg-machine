@@ -6,7 +6,7 @@ use arpg_machine::account::{tier_scaling, Account};
 use arpg_machine::character::Character;
 use arpg_machine::content::{presets, ArtifactKind, Build, Family, Loot, SpellId, SupportKind};
 use arpg_machine::math::V2;
-use arpg_machine::tree::{SkillTree, ORIGIN};
+use arpg_machine::tree::{card_width, SkillTree, CARD_H, ORIGIN, ORIGIN_SIZE};
 use macroquad::prelude::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -44,7 +44,6 @@ pub enum PlanAction {
 }
 
 const HEADER: f32 = 76.0;
-const CARD_H: f32 = 92.0;
 const DRAG_THRESHOLD: f32 = 5.0;
 
 // Loadout layout (logical pixels, laid out for the default 1600 × 900 window).
@@ -76,12 +75,28 @@ const ART_Y: f32 = 350.0;
 const ART_UNIT: f32 = 108.0;
 const ART_H: f32 = 74.0;
 
-fn tree_card_w(size: u8) -> f32 {
-    if size >= 2 {
-        265.0
-    } else {
-        218.0
-    }
+/// Lays cards out in rows of `cols` units; a card of size n is n units wide
+/// (minus the gap), so sizes read at a glance. Each card goes into the first
+/// row of its group with room left (first fit), so small cards fill the holes
+/// next to big ones. Returns rects in item order.
+#[allow(clippy::too_many_arguments)]
+fn pack<G: PartialEq + Copy>(items: &[(G, u8)], x0: f32, y0: f32, unit: f32, gap: f32, cols: u8, row_h: f32, card_h: f32) -> Vec<Rect> {
+    let mut rows: Vec<(G, u8)> = Vec::new();
+    items
+        .iter()
+        .map(|&(group, size)| {
+            let row = match rows.iter().position(|&(g, used)| g == group && used + size <= cols) {
+                Some(row) => row,
+                None => {
+                    rows.push((group, 0));
+                    rows.len() - 1
+                }
+            };
+            let used = rows[row].1;
+            rows[row].1 += size;
+            Rect::new(x0 + used as f32 * unit, y0 + row as f32 * row_h, size as f32 * unit - gap, card_h)
+        })
+        .collect()
 }
 
 fn v2(p: V2) -> Vec2 {
@@ -139,7 +154,11 @@ impl Planner {
 
     /// Spells shown in the collection: available ones, through the family filter.
     fn listed(&self) -> Vec<SpellId> {
-        self.available().into_iter().filter(|s| self.family_filter.is_none_or(|f| s.family() == f)).collect()
+        let mut spells: Vec<SpellId> =
+            self.available().into_iter().filter(|s| self.family_filter.is_none_or(|f| s.family() == f)).collect();
+        // Within a family, big cards first: rows fill up without holes.
+        spells.sort_by_key(|s| (s.family(), std::cmp::Reverse(s.size()), *s));
+        spells
     }
 
     fn filter_rect(i: usize) -> Rect {
@@ -361,8 +380,8 @@ impl Planner {
         let node = &self.tree.nodes[id];
         let c = self.to_screen(node.pos);
         let (w, h) = match node.spell {
-            Some(s) => (tree_card_w(s.size()), CARD_H),
-            None => (90.0, 90.0),
+            Some(s) => (card_width(s.size()), CARD_H),
+            None => (ORIGIN_SIZE, ORIGIN_SIZE),
         };
         Rect::new(c.x - w * self.zoom / 2.0, c.y - h * self.zoom / 2.0, w * self.zoom, h * self.zoom)
     }
@@ -446,19 +465,13 @@ impl Planner {
         for (i, node) in self.tree.nodes.iter().enumerate() {
             for &j in &node.neighbors {
                 let (vi, vj) = (self.tree.visible(i), self.tree.visible(j));
-                if !vi && !vj {
+                if (!vi && !vj) || j < i {
                     continue;
                 }
                 if vi != vj {
-                    // A path leads somewhere you have not discovered yet: show its start.
-                    let (from, to) = if vi { (node.pos, self.tree.nodes[j].pos) } else { continue };
-                    let a = self.to_screen(from);
-                    let b = a + (self.to_screen(to) - a) * 0.3;
-                    draw_line(a.x, a.y, b.x, b.y, (2.0 * self.zoom).max(1.5), Color::new(0.2, 0.22, 0.28, 1.0));
-                    draw_circle(b.x, b.y, 3.0, Color::new(0.3, 0.32, 0.4, 1.0));
-                    continue;
-                }
-                if j < i {
+                    // A path toward an undiscovered node: a dim line to its "?" card.
+                    let (a, b) = (self.to_screen(node.pos), self.to_screen(self.tree.nodes[j].pos));
+                    draw_line(a.x, a.y, b.x, b.y, (2.0 * self.zoom).max(1.5), Color::new(0.17, 0.18, 0.23, 1.0));
                     continue;
                 }
                 let (a, b) = (self.to_screen(node.pos), self.to_screen(self.tree.nodes[j].pos));
@@ -477,7 +490,17 @@ impl Planner {
         let z = self.zoom;
         for id in 0..self.tree.nodes.len() {
             let r = self.node_rect(id);
-            if !r.overlaps(&canvas) || !self.tree.visible(id) {
+            if !r.overlaps(&canvas) {
+                continue;
+            }
+            if !self.tree.visible(id) {
+                // Undiscovered, but next to what you can see: a dark card with a "?".
+                if self.tree.nodes[id].neighbors.iter().any(|&n| self.tree.visible(n)) {
+                    draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.045, 0.05, 0.065, 1.0));
+                    draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.16, 0.17, 0.22, 1.0));
+                    let tw = ui.width("?", 30) * z;
+                    ui.text_scaled("?", r.center().x - tw / 2.0, r.center().y + 10.0 * z, 30, z, Color::new(0.3, 0.32, 0.4, 1.0));
+                }
                 continue;
             }
             let node = &self.tree.nodes[id];
@@ -505,14 +528,21 @@ impl Planner {
                 (BORDER, 1.0)
             };
             draw_rectangle_lines(r.x, r.y, r.w, r.h, thick, border);
+            // The card's width is its size; long names wrap onto a second line.
             let name_color = if is_owned { TEXT } else { Color::new(0.78, 0.8, 0.86, 1.0) };
-            ui.text_scaled(spell.name(), r.x + 16.0 * z, r.y + 36.0 * z, 26, z, name_color);
+            let inner = r.w / z - 28.0;
+            let lines = ui.wrap_lines(spell.name(), inner, 22);
+            for (k, line) in lines.iter().take(2).enumerate() {
+                ui.text_scaled(line, r.x + 14.0 * z, r.y + (32.0 + 24.0 * k as f32) * z, 22, z, name_color);
+            }
             if z > 0.24 {
-                let line = format!("{} · {} · size {}", spell.family().name(), spell.delivery().name(), spell.size());
-                ui.text_scaled(&line, r.x + 16.0 * z, r.y + 64.0 * z, 17, z, MUTED);
+                let full = format!("{} · {}", spell.family().name(), spell.delivery().name());
+                let line = if ui.width(&full, 16) <= inner { full } else { spell.delivery().name().to_string() };
+                let y = if lines.len() > 1 { 84.0 } else { 62.0 };
+                ui.text_scaled(&line, r.x + 16.0 * z, r.y + y * z, 16, z, MUTED);
             }
             if self.build.contains(spell) {
-                ui.text_scaled("ON BAR", r.right() - 74.0 * z, r.y + 84.0 * z, 16, z, GOOD);
+                ui.text_scaled("ON BAR", r.right() - 62.0 * z, r.bottom() - 8.0 * z, 14, z, GOOD);
             }
         }
 
@@ -593,8 +623,10 @@ impl Planner {
 
     // ---- loadout ------------------------------------------------------------
 
-    fn spell_rect(&self, i: usize) -> Rect {
-        Rect::new(COLLECTION_X + (i % 3) as f32 * 162.0, SPELLS_Y + (i / 3) as f32 * 50.0 - self.list_scroll, 154.0, 44.0)
+    /// Cards of the spell collection (scrolled), size-proportional.
+    fn spell_rects(&self, spells: &[SpellId]) -> Vec<Rect> {
+        let items: Vec<(Family, u8)> = spells.iter().map(|s| (s.family(), s.size())).collect();
+        pack(&items, COLLECTION_X, SPELLS_Y - self.list_scroll, 162.0, 8.0, 3, 50.0, 44.0)
     }
 
     /// The visible part of the spell collection; cards outside it are hidden.
@@ -610,8 +642,18 @@ impl Planner {
         Rect::new(Self::right_x() + (i % 2) as f32 * 232.0, LIST_Y + (i / 2) as f32 * 52.0, 224.0, 46.0)
     }
 
-    fn artifact_rect(i: usize) -> Rect {
-        Rect::new(Self::right_x() + (i % 2) as f32 * 232.0, LIST_Y + 4.0 * 52.0 + 50.0 + (i / 2) as f32 * 52.0, 224.0, 46.0)
+    /// Artifacts in display order: big ones first so rows fill up.
+    fn artifact_order() -> Vec<ArtifactKind> {
+        let mut all = ArtifactKind::ALL.to_vec();
+        all.sort_by_key(|a| std::cmp::Reverse(a.size()));
+        all
+    }
+
+    /// Cards of the artifact collection (in `artifact_order`), size-proportional.
+    fn artifact_rects() -> Vec<Rect> {
+        let y = LIST_Y + 4.0 * 52.0 + 50.0;
+        let items: Vec<((), u8)> = Self::artifact_order().iter().map(|a| ((), a.size())).collect();
+        pack(&items, Self::right_x(), y, 116.0, 8.0, 4, 54.0, 48.0)
     }
 
     /// Width of one spell-bar slot: the bar fits between the collection and the supports.
@@ -680,9 +722,10 @@ impl Planner {
                 return Some((Item::Artifact(self.build.artifacts[i]), Source::ArtifactBar));
             }
         }
-        for (i, spell) in self.listed().into_iter().enumerate() {
-            if Self::list_area().contains(mouse) && self.spell_rect(i).contains(mouse) {
-                return Some((Item::Spell(spell), Source::Collection));
+        let listed = self.listed();
+        for (spell, r) in listed.iter().zip(self.spell_rects(&listed)) {
+            if Self::list_area().contains(mouse) && r.contains(mouse) {
+                return Some((Item::Spell(*spell), Source::Collection));
             }
         }
         for (i, s) in SupportKind::ALL.into_iter().enumerate() {
@@ -690,8 +733,8 @@ impl Planner {
                 return Some((Item::Support(s), Source::Collection));
             }
         }
-        for (i, a) in ArtifactKind::ALL.into_iter().enumerate() {
-            if Self::artifact_rect(i).contains(mouse) {
+        for (a, r) in Self::artifact_order().into_iter().zip(Self::artifact_rects()) {
+            if r.contains(mouse) {
                 return Some((Item::Artifact(a), Source::Collection));
             }
         }
@@ -818,8 +861,12 @@ impl Planner {
         }
         let dragging = self.drag.as_ref().filter(|d| d.active).map(|d| (d.item, d.source));
         let area = Self::list_area();
-        let rows = available.len().div_ceil(3) as f32;
-        let max_scroll = (rows * 50.0 - area.h).max(0.0);
+        let content_h = {
+            let items: Vec<(Family, u8)> = available.iter().map(|s| (s.family(), s.size())).collect();
+            let rects = pack(&items, 0.0, 0.0, 162.0, 8.0, 3, 50.0, 44.0);
+            rects.iter().map(|r| r.bottom()).fold(0.0, f32::max) + 6.0
+        };
+        let max_scroll = (content_h - area.h).max(0.0);
         let wheel = mouse_wheel().1;
         if area.contains(mouse) && wheel != 0.0 {
             self.list_scroll -= wheel.signum() * 60.0;
@@ -833,7 +880,7 @@ impl Planner {
         if max_scroll > 0.0 {
             ui.text("wheel: scroll", COLLECTION_X + 390.0, LIST_Y - 16.0, 14, MUTED);
             let track = Rect::new(area.right() - 2.0, area.y, 4.0, area.h);
-            let knob_h = (area.h * area.h / (rows * 50.0)).max(30.0);
+            let knob_h = (area.h * area.h / content_h).max(30.0);
             let knob_y = track.y + (track.h - knob_h) * (self.list_scroll / max_scroll);
             draw_rectangle(track.x, track.y, track.w, track.h, Color::new(0.12, 0.13, 0.17, 1.0));
             draw_rectangle(track.x, knob_y, track.w, knob_h, BORDER);
@@ -842,8 +889,7 @@ impl Planner {
             let hint = if self.family_filter.is_some() { "No spell of this family." } else { "Buy spells in the Skill Tree first (Tab)." };
             ui.wrapped(hint, COLLECTION_X, SPELLS_Y + 24.0, 460.0, 18, MUTED);
         }
-        for (i, spell) in available.iter().enumerate() {
-            let r = self.spell_rect(i);
+        for (spell, r) in available.iter().zip(self.spell_rects(&available)) {
             if r.y < area.y || r.bottom() > area.bottom() {
                 continue;
             }
@@ -854,7 +900,7 @@ impl Planner {
             side_arrows(r, spell.affects_sides(), 0.75);
             let color = if on_bar { MUTED } else { TEXT };
             ui.text(spell.name(), r.x + 12.0, r.y + 20.0, 16, color);
-            let sub = if on_bar { "on the bar".to_string() } else { format!("{} · size {}", spell.delivery().name(), spell.size()) };
+            let sub = if on_bar { "on the bar".to_string() } else { format!("{} · {}", spell.family().name(), spell.delivery().name()) };
             ui.text(&sub, r.x + 12.0, r.y + 37.0, 13, if on_bar { GOOD } else { MUTED });
         }
 
@@ -976,11 +1022,11 @@ impl Planner {
         }
 
         // Artifacts.
-        let ay = Self::artifact_rect(0).y;
+        let artifact_rects = Self::artifact_rects();
+        let ay = artifact_rects[0].y;
         ui.text("Artifacts", rx, ay - 16.0, 20, ACCENT);
         ui.text("drag onto the artifact bar", rx + 100.0, ay - 16.0, 14, MUTED);
-        for (i, a) in ArtifactKind::ALL.into_iter().enumerate() {
-            let r = Self::artifact_rect(i);
+        for (a, r) in Self::artifact_order().into_iter().zip(artifact_rects) {
             let equipped = self.build.has_artifact(a);
             let owned = self.owns_artifact(a);
             let copies = self.account.artifact_copies(a);
@@ -995,7 +1041,7 @@ impl Planner {
             draw_rectangle(r.x, r.y, r.w, r.h, fill);
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.35, 0.3, 0.2, 1.0));
             let dim = Color::new(0.35, 0.33, 0.3, 1.0);
-            ui.text(a.name(), r.x + 12.0, r.y + 21.0, 17, if !owned { dim } else if equipped { MUTED } else { TEXT });
+            ui.text(a.name(), r.x + 8.0, r.y + 20.0, 14, if !owned { dim } else if equipped { MUTED } else { TEXT });
             let count = if copies > 1 && !self.sandbox { format!(" · ×{copies}") } else { String::new() };
             let sub = if !owned {
                 "not found yet".to_string()
@@ -1004,7 +1050,7 @@ impl Planner {
             } else {
                 format!("size {}{count}", a.size())
             };
-            ui.text(&sub, r.x + 12.0, r.y + 39.0, 13, if !owned { dim } else if equipped { GOOD } else { MUTED });
+            ui.text(&sub, r.x + 8.0, r.y + 39.0, 12, if !owned { dim } else if equipped { GOOD } else { MUTED });
         }
 
         // The card under the cursor while dragging.

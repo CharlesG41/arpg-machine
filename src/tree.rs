@@ -14,8 +14,23 @@ use std::f32::consts::TAU;
 /// Layout is stretched horizontally, like God Tower's, to fit wide cards.
 const STRETCH: f32 = 1.7;
 /// Minimum spacing between card centers (either axis is enough).
-const MIN_DX: f32 = 290.0;
-const MIN_DY: f32 = 130.0;
+/// Cards are as wide as their spell's size: size 2 is twice size 1.
+pub const CARD_UNIT: f32 = 170.0;
+pub const CARD_GAP: f32 = 14.0;
+pub const CARD_H: f32 = 100.0;
+pub const ORIGIN_SIZE: f32 = 90.0;
+/// Space kept between two cards side by side, or one above the other.
+const GAP_X: f32 = 40.0;
+const MIN_DY: f32 = CARD_H + 30.0;
+
+pub fn card_width(size: u8) -> f32 {
+    size as f32 * CARD_UNIT - CARD_GAP
+}
+
+/// Whether two cards (centers and widths) leave enough room between them.
+fn apart(p: V2, pw: f32, q: V2, qw: f32) -> bool {
+    (p.x - q.x).abs() >= (pw + qw) / 2.0 + GAP_X || (p.y - q.y).abs() >= MIN_DY
+}
 
 #[derive(Clone, Debug)]
 pub struct TreeNode {
@@ -50,6 +65,8 @@ impl SkillTree {
         }
 
         let mut positions = vec![V2::ZERO];
+        // Card width of each position: position k holds pool[k - 1].
+        let width_of = |k: usize| if k == 0 { ORIGIN_SIZE } else { card_width(pool[k - 1].size()) };
         let rotation = rng.range(0.0, TAU);
         // Six short exits keep the first choices close to the Origin.
         for i in 0..6 {
@@ -93,7 +110,8 @@ impl SkillTree {
                         rng.range(spread, spread + 60.0) + attempt as f32 * 20.0
                     };
                     let p = V2::new((center.x + angle.cos() * r) * STRETCH, center.y + angle.sin() * r);
-                    if positions.iter().all(|q| (q.x - p.x).abs() >= MIN_DX || (q.y - p.y).abs() >= MIN_DY) {
+                    let w = width_of(positions.len());
+                    if positions.iter().enumerate().all(|(k, &q)| apart(p, w, q, width_of(k))) {
                         group.push(positions.len());
                         positions.push(p);
                         break;
@@ -370,7 +388,16 @@ mod tests {
             let tree = SkillTree::generate(seed, 14);
             for (i, a) in tree.nodes.iter().enumerate() {
                 for b in &tree.nodes[i + 1..] {
-                    assert!((a.pos.x - b.pos.x).abs() >= MIN_DX || (a.pos.y - b.pos.y).abs() >= MIN_DY);
+                    let w = |n: &TreeNode| n.spell.map_or(ORIGIN_SIZE, |s| card_width(s.size()));
+                    // Exits sit on a fixed ring; everything placed later keeps its distance.
+                    if a.spell.is_some() && b.spell.is_some() {
+                        assert!(
+                            (a.pos.x - b.pos.x).abs() >= (w(a) + w(b)) / 2.0 || (a.pos.y - b.pos.y).abs() >= CARD_H,
+                            "seed {seed}: {} and {} overlap",
+                            a.spell.unwrap().name(),
+                            b.spell.unwrap().name()
+                        );
+                    }
                 }
             }
         }

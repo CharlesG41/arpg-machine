@@ -65,7 +65,10 @@ cargo run --release --example catalogue
   le remplace. Les lancements de débogage (variables `ARPG_*`) ne lisent ni
   n'écrivent la sauvegarde ni le compte.
 - **Découverte de l'arbre** : on ne voit que ses nœuds et ceux juste à côté ;
-  des amorces de lignes montrent qu'il y a autre chose plus loin. Au moins 4
+  les nœuds encore cachés juste au-delà apparaissent comme des cartes « ? ».
+- **Cartes proportionnelles** : un sort ou un artefact de taille 2 est deux fois
+  plus large qu'un de taille 1, partout (arbre, listes, barres). Les listes
+  placent chaque carte dans la première rangée de sa famille où elle entre. Au moins 4
   des 6 sorties de l'Origin font des dégâts.
 - **Skill tree** généré à partir d'une seed, sur le modèle de God Tower : une
   Origin, 6 sorties, une grappe de 5 sorts derrière chaque sortie, et des ponts
