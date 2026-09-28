@@ -67,7 +67,7 @@ async fn main() {
     let ui = Ui { font };
     let env = |k: &str| std::env::var(k).ok();
     // Debug runs (screenshots, presets) never touch your saved character.
-    let debug_run = ["ARPG_SHOT", "ARPG_PRESET", "ARPG_PLAN", "ARPG_TREE_DEMO", "ARPG_AUTOPILOT"].iter().any(|k| env(k).is_some());
+    let debug_run = ["ARPG_SHOT", "ARPG_PRESET", "ARPG_PLAN", "ARPG_TREE_DEMO", "ARPG_AUTOPILOT", "ARPG_COLLECTION"].iter().any(|k| env(k).is_some());
     let mut planner = match (debug_run, arpg_machine::save::CharacterSave::load()) {
         (false, Some(save)) => Planner::from_save(&save),
         _ => Planner::new(1),
@@ -87,6 +87,8 @@ async fn main() {
     let mut result_delay = 0.0f32;
     // Experience from the current map goes to the character once, when it ends.
     let mut xp_banked = false;
+    // Artifacts the last map's loot fused up, for the result screen.
+    let mut fusions = Vec::new();
     let shot_path = env("ARPG_SHOT");
     let shot_at: f32 = env("ARPG_SHOT_AT").and_then(|s| s.parse().ok()).unwrap_or(1.0);
     let mut screen_time = 0.0f32;
@@ -94,12 +96,15 @@ async fn main() {
     let find_preset = |name: &str| presets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|p| p.1);
     if let Some(build) = env("ARPG_PRESET").and_then(|n| find_preset(&n)) {
         planner.load_preset(build);
-        world = Some(World::new(planner.build.clone(), map_seed, planner.tier).with_owned_supports(planner.account.supports.clone()));
+        world = Some(planner.new_world(map_seed));
         screen = Screen::Play;
     }
     if let Some(build) = env("ARPG_PLAN").and_then(|n| find_preset(&n)) {
         planner.load_preset(build);
         planner.tab = Tab::Loadout;
+    }
+    if env("ARPG_COLLECTION").is_some() {
+        planner.demo_collection();
     }
     if let Some(n) = env("ARPG_TREE_DEMO").and_then(|n| n.parse::<usize>().ok()) {
         // Buy a few routes toward far nodes, then put the learned spells on the bar.
@@ -120,7 +125,7 @@ async fn main() {
         match screen {
             Screen::Plan => {
                 if let PlanAction::Play = planner.draw(&ui) {
-                    world = Some(World::new(planner.build.clone(), map_seed, planner.tier).with_owned_supports(planner.account.supports.clone()));
+                    world = Some(planner.new_world(map_seed));
                     fx = Fx::new();
                     accumulator = 0.0;
                     result_delay = 0.0;
@@ -136,7 +141,7 @@ async fn main() {
                         // Leaving early keeps the experience (light death penalty, design §9).
                         if !xp_banked {
                             planner.gain_xp(w.xp);
-                            planner.receive_loot(&w.loot());
+                            fusions = planner.receive_loot(&w.loot());
                             xp_banked = true;
                         }
                         screen = Screen::Plan;
@@ -170,7 +175,7 @@ async fn main() {
                             screen = Screen::Result;
                             if !xp_banked {
                                 planner.gain_xp(w.xp);
-                                planner.receive_loot(&w.loot());
+                                fusions = planner.receive_loot(&w.loot());
                                 if w.phase == Phase::Victory {
                                     planner.record_victory(w.tier);
                                 }
@@ -187,10 +192,10 @@ async fn main() {
                 let pending = if xp_banked { 0 } else { w.xp };
                 ui::hud(&ui, w, &fx, show_stats, use_autopilot, planner.character, pending);
                 if matches!(screen, Screen::Result) {
-                    match ui::result_panel(&ui, w) {
+                    match ui::result_panel(&ui, w, &fusions) {
                         ResultAction::Replay => {
                             map_seed = map_seed.wrapping_add(1);
-                            *w = World::new(planner.build.clone(), map_seed, planner.tier).with_owned_supports(planner.account.supports.clone());
+                            *w = planner.new_world(map_seed);
                             fx = Fx::new();
                             result_delay = 0.0;
                             xp_banked = false;

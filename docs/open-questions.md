@@ -17,13 +17,16 @@
 
 ### Loot
 - **Artefacts** : drops des monstres, au niveau du compte. Fusion de 2
-  identiques du même tier → tier suivant. Capacité en taille, de 2 à 7 selon
-  le niveau.
+  identiques du même tier → tier suivant, **automatique** (garder deux copies
+  ne sert à rien : les artefacts sont au compte). Chaque tier : ×1 → ×3 sur
+  les chiffres. Le tier de map fixe le tier qui droppe. Capacité en taille, de
+  2 à 7 selon le niveau.
 - **Supports** : drops des monstres. Ce sont des déblocages au niveau du
   compte, sans tiers. Chaque support ne peut servir qu'une fois par build. Un
   support débloqué sort de la table de drop.
 - **Artefacts légendaires au tier 5** : +1 socket de support. Un support ne
-  va que sur un artefact qui partage un de ses tags.
+  va que sur un artefact qui partage son thème, et il marche alors sur tous
+  les sorts de la barre qu'il accepte.
 - **Sorts légendaires** : un seul drop possible par sort, appliqué
   automatiquement, au niveau du compte. +1 socket de support (tous les sorts,
   y compris le mouvement) et des valeurs un peu plus fortes. Taux fixe par
@@ -74,18 +77,21 @@
 ### Build
 1. Les paliers exacts de capacité d'artefacts et de slots de sort.
 2. Les poids du drop de légendaires par type d'ennemi.
+3. **Artefacts légendaires sans socket** : 10 artefacts (stats, Bloodstone,
+   Quick Boots…) n'ont pas de support de leur thème. Leur donner un bonus
+   légendaire propre, ou de nouveaux supports (défense, mouvement)?
 
 ### Maps
-3. **Modificateurs de map** : plus tard. Point de départ : les 20 Boss
+4. **Modificateurs de map** : plus tard. Point de départ : les 20 Boss
    Contracts de God Tower.
-4. La courbe des tiers de map par rapport au niveau du personnage.
+5. La courbe des tiers de map par rapport au niveau du personnage.
 
 ### Identité
-5. **Qu'est-ce qui donne une raison d'avancer?** (pas encore d'idée) Un thème, un antagoniste?
+6. **Qu'est-ce qui donne une raison d'avancer?** (pas encore d'idée) Un thème, un antagoniste?
     Et est-ce qu'on garde Demon's Bargain et Cursed Mirror comme événements
     en map?
-6. **Nom.**
+7. **Nom.**
 
 ### Plus tard
-7. **Solo seulement, ou co-op plus tard?** Le raid de God Tower pourrait
+8. **Solo seulement, ou co-op plus tard?** Le raid de God Tower pourrait
     servir de base technique.

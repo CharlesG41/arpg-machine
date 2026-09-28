@@ -479,10 +479,25 @@ pub enum Event {
     Compacted,
 }
 
+/// The supports working on a slot: its own, plus the ones legendary
+/// artifacts grant to every spell they fit.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Supports(u16);
+
+impl Supports {
+    fn has(self, support: SupportKind) -> bool {
+        self.0 & (1 << support as u16) != 0
+    }
+
+    fn with(self, support: SupportKind) -> Self {
+        Supports(self.0 | 1 << support as u16)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct SlotState {
     spell: SpellId,
-    support: Option<SupportKind>,
+    support: Supports,
     cooldown: f32,
     casts: u32,
     haste: f32,
@@ -520,7 +535,8 @@ struct Mods {
     cooldown_rate: f32,
     elite_damage: f32,
     heal_per_kill: f32,
-    momentum_on_any_kill: bool,
+    /// Momentum any kill grants (Momentum Engine).
+    momentum_per_kill: u8,
     area: f32,
     barrier_on_dash: f32,
     extra_jumps: u8,
@@ -530,30 +546,38 @@ struct Mods {
     armor: f32,
     mr: f32,
     max_hp: f32,
+    move_speed: f32,
 }
 
 impl Mods {
-    fn from(artifacts: &[ArtifactKind]) -> Self {
-        let has = |a| artifacts.contains(&a);
-        let pick = |a, yes: f32, no: f32| if has(a) { yes } else { no };
+    fn from(build: &Build) -> Self {
+        // The artifact's value at its tier, or 0 when it is not equipped.
+        let v = |a: ArtifactKind| if build.has_artifact(a) { a.value(build.tier(a)) } else { 0.0 };
+        let pct = |a| 1.0 + v(a) / 100.0;
+        let venom = if build.has_artifact(ArtifactKind::VenomGland) {
+            2.0 * crate::content::tier_mult(build.tier(ArtifactKind::VenomGland))
+        } else {
+            0.0
+        };
         Mods {
-            burn_damage: pick(ArtifactKind::EmberHeart, 1.3, 1.0),
-            poison_damage: pick(ArtifactKind::VenomGland, 1.2, 1.0),
-            poison_duration: pick(ArtifactKind::VenomGland, 6.0, 4.0),
-            chilled_vulnerability: pick(ArtifactKind::FrostSigil, 1.2, 1.0),
-            cooldown_rate: pick(ArtifactKind::StormBattery, 1.15, 1.0),
-            elite_damage: pick(ArtifactKind::HuntersLens, 1.3, 1.0),
-            heal_per_kill: pick(ArtifactKind::SoulSiphon, 1.0, 0.0),
-            momentum_on_any_kill: has(ArtifactKind::MomentumEngine),
-            area: pick(ArtifactKind::WideLens, 1.25, 1.0),
-            barrier_on_dash: pick(ArtifactKind::BarrierCharm, 25.0, 0.0),
-            extra_jumps: u8::from(has(ArtifactKind::ChainLink)),
-            extra_pierce: u8::from(has(ArtifactKind::ChainLink)),
-            ad: pick(ArtifactKind::Warband, 15.0, 0.0),
-            ap: pick(ArtifactKind::SagesRing, 15.0, 0.0),
-            armor: pick(ArtifactKind::IronPlate, 25.0, 0.0),
-            mr: pick(ArtifactKind::SpiritVeil, 25.0, 0.0),
-            max_hp: pick(ArtifactKind::Bloodstone, 100.0, 0.0),
+            burn_damage: pct(ArtifactKind::EmberHeart),
+            poison_damage: pct(ArtifactKind::VenomGland),
+            poison_duration: 4.0 + venom,
+            chilled_vulnerability: pct(ArtifactKind::FrostSigil),
+            cooldown_rate: pct(ArtifactKind::StormBattery),
+            elite_damage: pct(ArtifactKind::HuntersLens),
+            heal_per_kill: v(ArtifactKind::SoulSiphon),
+            momentum_per_kill: v(ArtifactKind::MomentumEngine) as u8,
+            area: pct(ArtifactKind::WideLens),
+            barrier_on_dash: v(ArtifactKind::BarrierCharm),
+            extra_jumps: v(ArtifactKind::ChainLink) as u8,
+            extra_pierce: v(ArtifactKind::ChainLink) as u8,
+            ad: v(ArtifactKind::Warband),
+            ap: v(ArtifactKind::SagesRing),
+            armor: v(ArtifactKind::IronPlate),
+            mr: v(ArtifactKind::SpiritVeil),
+            max_hp: v(ArtifactKind::Bloodstone),
+            move_speed: pct(ArtifactKind::QuickBoots),
         }
     }
 }
@@ -591,6 +615,8 @@ pub struct World {
     drop_thresholds: Vec<f32>,
     /// Supports the account already has: they no longer drop.
     owned_supports: Vec<SupportKind>,
+    /// Artifacts the account has at legendary already: they no longer drop.
+    maxed_artifacts: Vec<ArtifactKind>,
     start: V2,
     pub projectiles: Vec<Projectile>,
     pub enemy_shots: Vec<EnemyShot>,
@@ -628,7 +654,11 @@ impl World {
             .take(MAX_SLOTS)
             .map(|s| SlotState {
                 spell: s.spell,
-                support: s.support,
+                support: build
+                    .granted_supports()
+                    .chain(s.support)
+                    .filter(|sup| sup.fits(s.spell))
+                    .fold(Supports::default(), Supports::with),
                 cooldown: 0.0,
                 casts: 0,
                 haste: 0.0,
@@ -639,7 +669,7 @@ impl World {
                 snapshot: [0.0; ReserveKind::COUNT],
             })
             .collect::<Vec<_>>();
-        let mods = Mods::from(&build.artifacts);
+        let mods = Mods::from(&build);
         let quick = build.artifacts.contains(&ArtifactKind::QuickBoots);
         let stats = vec![SpellStats::default(); slots.len()];
         let mut orbits = Vec::new();
@@ -679,7 +709,7 @@ impl World {
                 dash_time: 0.0,
                 dash_dir: V2::ZERO,
                 invulnerable: 0.0,
-                speed: PLAYER_SPEED * if quick { 1.15 } else { 1.0 },
+                speed: PLAYER_SPEED * mods.move_speed,
             },
             enemies: Vec::new(),
             next_id: 0,
@@ -691,6 +721,7 @@ impl World {
             drops: Vec::new(),
             drop_thresholds: Vec::new(),
             owned_supports: Vec::new(),
+            maxed_artifacts: Vec::new(),
             start,
             projectiles: Vec::new(),
             enemy_shots: Vec::new(),
@@ -732,13 +763,20 @@ impl World {
         self
     }
 
+    pub fn with_maxed_artifacts(mut self, maxed: Vec<ArtifactKind>) -> Self {
+        self.maxed_artifacts = maxed;
+        self
+    }
+
     /// Everything that dropped this map, picked up or not.
     pub fn loot(&self) -> Vec<Loot> {
         self.drops.iter().map(|d| d.loot).collect()
     }
 
-    /// A support you do not have yet (35%) or an artifact.
-    fn roll_loot(&mut self) -> Loot {
+    /// A support you do not have yet (35%) or an artifact. Artifacts drop at
+    /// the map tier's best artifact tier half the time, one lower otherwise;
+    /// the boss always drops the best.
+    fn roll_loot(&mut self, boss: bool) -> Loot {
         let dropped: Vec<SupportKind> = self
             .drops
             .iter()
@@ -751,15 +789,20 @@ impl World {
             .into_iter()
             .filter(|s| !self.owned_supports.contains(s) && !dropped.contains(s))
             .collect();
-        if !missing.is_empty() && self.rng.chance(0.35) {
-            Loot::Support(missing[self.rng.range_usize(0, missing.len() - 1)])
-        } else {
-            Loot::Artifact(ArtifactKind::ALL[self.rng.range_usize(0, ArtifactKind::ALL.len() - 1)])
+        let artifacts: Vec<ArtifactKind> =
+            ArtifactKind::ALL.into_iter().filter(|a| !self.maxed_artifacts.contains(a)).collect();
+        if !missing.is_empty() && (artifacts.is_empty() || self.rng.chance(0.35)) {
+            return Loot::Support(missing[self.rng.range_usize(0, missing.len() - 1)]);
         }
+        // Everything collected: a copy of anything, for the pleasure of it.
+        let pool = if artifacts.is_empty() { ArtifactKind::ALL.to_vec() } else { artifacts };
+        let best = crate::account::max_drop_tier(self.tier);
+        let tier = if boss || self.rng.chance(0.5) { best } else { (best - 1).max(1) };
+        Loot::Artifact(pool[self.rng.range_usize(0, pool.len() - 1)], tier)
     }
 
-    fn drop_loot(&mut self, pos: V2) {
-        let loot = self.roll_loot();
+    fn drop_loot(&mut self, pos: V2, boss: bool) {
+        let loot = self.roll_loot(boss);
         self.drops.push(LootDrop { pos, loot, picked: false });
         self.events.push(Event::LootDropped { pos, loot });
     }
@@ -1102,7 +1145,7 @@ impl World {
     }
 
     fn support_active(&self, support: SupportKind) -> Option<usize> {
-        self.slots.iter().position(|s| s.support == Some(support))
+        self.slots.iter().position(|s| s.support.has(support))
     }
 
     fn in_combat(&self) -> bool {
@@ -1530,7 +1573,7 @@ impl World {
         }
     }
 
-    fn area(&self, support: Option<SupportKind>) -> f32 {
+    fn area(&self, support: Supports) -> f32 {
         area_mult(support) * self.mods.area
     }
 
@@ -1578,8 +1621,8 @@ impl World {
     fn cast(&mut self, slot: usize) -> bool {
         let SlotState { spell, support, casts, .. } = self.slots[slot];
         let def = spell.def();
-        let hunter = support == Some(SupportKind::Hunter);
-        let multishot = support == Some(SupportKind::Multishot);
+        let hunter = support.has(SupportKind::Hunter);
+        let multishot = support.has(SupportKind::Multishot);
         let boost = def.boost.filter(|(c, _)| self.holds(*c, slot)).map_or(1.0, |(_, m)| m);
         let reserve = def
             .hits
@@ -1624,7 +1667,7 @@ impl World {
                         if let Some(t) = target {
                             self.enemies[t].pending += estimate;
                         }
-                        let pierce = pierce + if support == Some(SupportKind::Pierce) { 3 } else { 0 } + self.mods.extra_pierce;
+                        let pierce = pierce + if support.has(SupportKind::Pierce) { 3 } else { 0 } + self.mods.extra_pierce;
                         self.projectiles.push(Projectile {
                             pos: origin,
                             vel: aim.norm() * 900.0,
@@ -1761,7 +1804,7 @@ impl World {
             self.slots[slot].snapshot = self.reserves;
             self.slots[slot].last_cast = self.time;
             self.events.push(Event::Cast { slot });
-            if self.slots.get(slot + 1).is_some_and(|s| s.support == Some(SupportKind::Echo)) {
+            if self.slots.get(slot + 1).is_some_and(|s| s.support.has(SupportKind::Echo)) {
                 self.cast(slot + 1);
             }
         }
@@ -1967,10 +2010,11 @@ impl World {
             burn_immune: self.burn_immune(index),
         };
         self.apply_hits(index, def.hits, &mut st, 0);
-        match support {
-            Some(SupportKind::Contagion) => self.spell_poison(index, 3, slot),
-            Some(SupportKind::Combustion) => self.spell_burn(index, 3, slot, st.burn_immune),
-            _ => {}
+        if support.has(SupportKind::Contagion) {
+            self.spell_poison(index, 3, slot);
+        }
+        if support.has(SupportKind::Combustion) {
+            self.spell_burn(index, 3, slot, st.burn_immune);
         }
         // Marks react to direct damage from your spells.
         if st.dealt > 0.0 && self.enemies[index].alive {
@@ -2354,7 +2398,6 @@ impl World {
     fn process_deaths(&mut self) {
         let contagion = self.support_active(SupportKind::Contagion).is_some();
         let combustion = self.support_active(SupportKind::Combustion);
-        let frenzy = self.support_active(SupportKind::Frenzy);
         let mut guard = 0;
         while let Some((index, family)) = self.death_queue.pop() {
             guard += 1;
@@ -2371,8 +2414,10 @@ impl World {
             if let Some(stats) = self.stats.get_mut(e.last_source as usize) {
                 stats.kills += 1;
             }
-            if self.mods.momentum_on_any_kill || frenzy.is_some_and(|slot| slot as u8 == e.last_source) {
-                self.momentum = (self.momentum + 1).min(MOMENTUM_MAX);
+            let frenzy = self.slots.get(e.last_source as usize).is_some_and(|s| s.support.has(SupportKind::Frenzy));
+            let gained = self.mods.momentum_per_kill.max(u8::from(frenzy));
+            if gained > 0 {
+                self.momentum = (self.momentum + gained).min(MOMENTUM_MAX);
                 self.momentum_timer = 0.0;
             }
             self.heal(self.mods.heal_per_kill);
@@ -2381,7 +2426,7 @@ impl World {
                 // The kill that crosses a loot threshold drops the item.
                 while self.drop_thresholds.first().is_some_and(|&t| self.progress >= t) {
                     self.drop_thresholds.remove(0);
-                    self.drop_loot(e.pos);
+                    self.drop_loot(e.pos, false);
                 }
             }
             self.events.push(Event::Death { pos: e.pos, kind: e.kind, family, radius: e.radius });
@@ -2391,7 +2436,7 @@ impl World {
                 let count = self.rng.range_usize(1, 3);
                 for k in 0..count {
                     let offset = V2::from_angle(k as f32 * TAU / count as f32 + 0.4) * 45.0;
-                    self.drop_loot(e.pos + offset);
+                    self.drop_loot(e.pos + offset, true);
                 }
                 continue;
             }
@@ -2539,8 +2584,8 @@ fn grow_index(stat: Stat) -> Option<usize> {
     }
 }
 
-fn area_mult(support: Option<SupportKind>) -> f32 {
-    if support == Some(SupportKind::Amplify) {
+fn area_mult(support: Supports) -> f32 {
+    if support.has(SupportKind::Amplify) {
         1.5
     } else {
         1.0
@@ -2911,8 +2956,33 @@ mod tests {
         let world = World::new(Build::empty(), 3, 1).with_owned_supports(SupportKind::ALL.to_vec());
         let mut world = world;
         for _ in 0..50 {
-            assert!(matches!(world.roll_loot(), Loot::Artifact(_)));
+            assert!(matches!(world.roll_loot(false), Loot::Artifact(..)));
         }
+    }
+
+    #[test]
+    fn map_tier_sets_the_artifact_tier_and_legendaries_stop_dropping() {
+        let mut world = World::new(Build::empty(), 3, 5)
+            .with_owned_supports(SupportKind::ALL.to_vec())
+            .with_maxed_artifacts(ArtifactKind::ALL[1..].to_vec());
+        for _ in 0..50 {
+            let Loot::Artifact(a, tier) = world.roll_loot(false) else { panic!() };
+            assert_eq!(a, ArtifactKind::ALL[0]);
+            assert!((2..=3).contains(&tier));
+            assert!(matches!(world.roll_loot(true), Loot::Artifact(_, 3)), "the boss drops the best tier");
+        }
+    }
+
+    #[test]
+    fn legendary_artifacts_lend_their_support_to_the_bar() {
+        let mut build = bar(&["Arcane Bolt", "Frost Needle", "Thunderclap"]);
+        build.place_artifact(ArtifactKind::ChainLink, 0);
+        build.tiers[ArtifactKind::ChainLink.index()] = 5;
+        assert!(build.socket_artifact(ArtifactKind::ChainLink, SupportKind::Pierce));
+        let world = World::new(build, 1, 1);
+        let pierce: Vec<bool> = world.slots.iter().map(|s| s.support.has(SupportKind::Pierce)).collect();
+        assert_eq!(pierce, vec![true, true, false], "only projectile spells get Pierce");
+        assert_eq!(world.mods.extra_jumps, 3);
     }
 
     #[test]
@@ -2928,11 +2998,13 @@ mod tests {
 
     #[test]
     fn artifacts_change_the_player() {
-        let build = Build::new(vec![], vec![ArtifactKind::Bloodstone, ArtifactKind::QuickBoots, ArtifactKind::SagesRing]);
-        let world = World::new(build, 1, 1);
+        let mut build = Build::new(vec![], vec![ArtifactKind::Bloodstone, ArtifactKind::QuickBoots, ArtifactKind::SagesRing]);
+        let world = World::new(build.clone(), 1, 1);
         assert_eq!(world.max_hp(), BASE_HP + 100.0);
         assert!(world.player.dash_cooldown_max < DASH_COOLDOWN);
         assert_eq!(world.stat(Stat::Ap), BASE_AP + 15.0);
+        build.tiers[ArtifactKind::Bloodstone.index()] = 3;
+        assert_eq!(World::new(build, 1, 1).max_hp(), BASE_HP + 200.0);
     }
 
     #[test]

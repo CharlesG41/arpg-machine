@@ -293,6 +293,13 @@ possibles :
 **Décidé : la fusion.** Elle donne une valeur à chaque drop et protège
 l'expérimentation.
 
+**Fait (prototype)** : la fusion est automatique. Comme les artefacts sont au
+compte et qu'un build n'en équipe qu'une copie, garder deux copies ne sert à
+rien : le « choix » de fusionner n'en était pas un. Les chiffres montent de
+×1 à ×3 du tier 1 au tier 5. Au tier 5, le support du socket légendaire
+marche sur tous les sorts de la barre qu'il accepte (détails dans
+prototype.md).
+
 - Fusion : 2 copies du même artefact au même tier → 1 copie au tier suivant.
   La progression de copies est donc exponentielle (tier 4 = 8 copies de tier 1).
 - Garder l'identité fixe des artefacts de God Tower (un effet précis), sans

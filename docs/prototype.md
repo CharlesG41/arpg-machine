@@ -17,9 +17,9 @@ Planification :
   pour rembourser (gratuit), glisser pour déplacer, molette pour zoomer.
   « New character » génère un nouvel arbre.
 - **Loadout** : glisser-déposer les sorts sur la barre de sorts, les supports
-  dans le socket d'un sort, et les artefacts sur la barre d'artefacts. Glisser
-  une carte hors de sa barre la retire. Un clic sur un sort ou un artefact
-  l'ajoute au bout.
+  dans le socket d'un sort (ou d'un artefact légendaire), et les artefacts sur
+  la barre d'artefacts. Glisser une carte hors de sa barre, ou un clic droit
+  dessus, la retire. Un clic sur un sort ou un artefact l'ajoute au bout.
 - Tab : changer d'onglet. Entrée : jouer.
 
 En map :
@@ -57,8 +57,26 @@ cargo run --release --example catalogue
   marcher dessus le ramasse, et tout ce qui est tombé est gagné à la fin de la
   map, même après une défaite. Supports et artefacts vont au compte
   (`~/.arpg-machine/account.txt`) ; le Loadout grise ce qui n'est pas encore
-  trouvé et compte les copies d'artefacts (pour la fusion à venir). Le Sandbox
-  garde tout débloqué.
+  trouvé. Le Sandbox garde tout débloqué.
+- **Tiers d'artefacts et fusion** : tier 1 à 5, le tier 5 est légendaire. Deux
+  copies d'un tier fusionnent **automatiquement** en une du tier suivant (le
+  compte garde la « valeur » en copies de tier 1 : 5 = un tier 3 + un tier 1).
+  Chaque tier multiplie les chiffres de l'artefact : ×1, ×1,5, ×2, ×2,5, ×3
+  (bonus entiers comme les rebonds : 1, 1, 2, 2, 3). Les artefacts équipés
+  utilisent le meilleur tier possédé. La carte montre le tier (couleur :
+  blanc, vert, bleu, violet, orange) et une barre de progression de fusion ;
+  le tooltip montre le tier suivant. L'écran de résultat et le bandeau
+  annoncent les fusions.
+- **Drops selon le tier de map** : les maps de tier 1–2 droppent des tier 1,
+  3–4 jusqu'au tier 2, 5–6 tier 3, 7–8 tier 4, 9+ légendaire. La moitié des
+  drops est au meilleur tier, l'autre un cran plus bas ; le boss donne
+  toujours le meilleur. Un artefact déjà légendaire ne droppe plus.
+- **Socket légendaire** : un artefact légendaire peut tenir un support de son
+  thème, qui marche alors sur **tous les sorts de la barre** qu'il accepte (au
+  lieu d'un seul) : Chain Link (Multishot ou Pierce), Wide Lens (Amplify),
+  Ember Heart (Combustion), Venom Gland (Contagion), Hunter's Lens (Hunter),
+  Storm Battery (Frenzy). Le support compte toujours pour son « une fois par
+  build ». Les 10 autres artefacts n'ont pas de socket (question ouverte).
 - **Sauvegarde** : le personnage (niveau, XP, arbre, loadout, tier) est
   sauvegardé automatiquement à chaque changement dans
   `~/.arpg-machine/character.txt`, et rechargé au lancement. « New character »
@@ -88,7 +106,8 @@ cargo run --release --example catalogue
 - **8 supports**, une fois chacun par build : Multishot, Pierce, Amplify,
   Contagion, Combustion, Frenzy, Hunter, Echo.
 - **16 artefacts**, dont 4 de stats (Sage's Ring +15 AP, Warband +15 AD, Iron
-  Plate +25 PR, Spirit Veil +25 MR).
+  Plate +25 PR, Spirit Veil +25 MR, au tier 1). Soul Siphon passe à 2 PV par
+  kill au tier 1.
 - **Mode sandbox** : tous les sorts, sans l'arbre. Les 4 builds prêts (Starter,
   Plague, Inferno, Steel) l'activent.
 - **Une map infinie**, générée par chunks de 1200 × 1200 autour de toi (7 à 11
@@ -154,6 +173,5 @@ cargo run --release --example catalogue
 
 ## Pas dans le prototype
 
-Niveaux (remplacés par le réglage de points), portail de l'arbre, loot et
-drops, fusion, légendaires, supports sur le dash, modificateurs de map,
-plusieurs boss.
+Portail de l'arbre, sorts légendaires, supports sur le dash, modificateurs de
+map, choix de map, plusieurs boss.

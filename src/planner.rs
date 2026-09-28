@@ -1,11 +1,12 @@
 //! Planning screens: the skill tree, and the loadout where spells, supports and
 //! artifacts are dragged into place.
-use crate::render::{family_color, side_arrows};
+use crate::render::{family_color, side_arrows, tier_color};
 use crate::ui::{Tooltip, Ui, ACCENT, BORDER, CARD, CARD_HOVER, DANGER, GOOD, MUTED, PANEL, PANEL_HOVER, TEXT};
 use arpg_machine::account::{tier_scaling, Account};
 use arpg_machine::character::Character;
-use arpg_machine::content::{presets, ArtifactKind, Build, Family, Loot, SpellId, SupportKind};
+use arpg_machine::content::{presets, tier_label, ArtifactKind, Build, Family, Loot, SpellId, SupportKind, MAX_ARTIFACT_TIER};
 use arpg_machine::math::V2;
+use arpg_machine::world::World;
 use arpg_machine::tree::{card_width, SkillTree, CARD_H, ORIGIN, ORIGIN_SIZE};
 use macroquad::prelude::*;
 
@@ -29,6 +30,8 @@ enum Source {
     Bar,
     Socket,
     ArtifactBar,
+    /// The support socket of a legendary artifact.
+    ArtifactSocket,
 }
 
 struct Drag {
@@ -73,7 +76,7 @@ const BAR_Y: f32 = 150.0;
 const BAR_H: f32 = 132.0;
 const ART_Y: f32 = 350.0;
 const ART_UNIT: f32 = 108.0;
-const ART_H: f32 = 74.0;
+const ART_H: f32 = 96.0;
 
 /// Lays cards out in rows of `cols` units; a card of size n is n units wide
 /// (minus the gap), so sizes read at a glance. Each card goes into the first
@@ -181,7 +184,25 @@ impl Planner {
     }
 
     fn owns_artifact(&self, artifact: ArtifactKind) -> bool {
-        self.sandbox || self.account.artifact_copies(artifact) > 0
+        self.sandbox || self.account.artifact_tier(artifact) > 0
+    }
+
+    /// Equipped artifacts work at the best tier the account owns (tier 1 for
+    /// sandbox artifacts you have not found).
+    fn sync_tiers(&mut self) {
+        for a in ArtifactKind::ALL {
+            self.build.tiers[a.index()] = self.account.artifact_tier(a).max(1);
+        }
+        let build = &self.build;
+        let stale: Vec<SupportKind> = build
+            .artifact_sockets
+            .iter()
+            .filter(|&&(a, s)| !build.is_legendary(a) || !a.socket_fits(s))
+            .map(|&(_, s)| s)
+            .collect();
+        for s in stale {
+            self.build.unsocket(s);
+        }
     }
 
     /// Drops from the loadout what the tree no longer grants or the account does not own.
@@ -199,21 +220,67 @@ impl Planner {
                     slot.support = None;
                 }
             }
-            self.build.artifacts.retain(|&a| account.artifact_copies(a) > 0);
+            self.build.artifact_sockets.retain(|&(_, s)| account.has_support(s));
+            let lost: Vec<ArtifactKind> =
+                self.build.artifacts.iter().copied().filter(|&a| account.artifact_tier(a) == 0).collect();
+            for a in lost {
+                self.build.remove_artifact(a);
+            }
         }
+        self.sync_tiers();
     }
 
-    /// Loot from a map goes to the account collection (saved).
-    pub fn receive_loot(&mut self, loot: &[Loot]) {
+    /// Loot from a map goes to the account collection (saved). Returns the
+    /// artifacts it fused to a higher tier.
+    pub fn receive_loot(&mut self, loot: &[Loot]) -> Vec<(ArtifactKind, u8)> {
+        let mut fused = Vec::new();
         if loot.is_empty() {
-            return;
+            return fused;
         }
         for &item in loot {
-            self.account.add(item);
+            if let (Some(tier), Loot::Artifact(a, _)) = (self.account.add(item), item) {
+                fused.retain(|&(b, _): &(ArtifactKind, u8)| b != a);
+                fused.push((a, tier));
+            }
         }
         self.save_account();
-        let names: Vec<&str> = loot.iter().map(|l| l.name()).collect();
+        self.sync_tiers();
+        let names: Vec<String> = loot.iter().map(|l| l.name()).collect();
         self.say(&format!("Found: {}.", names.join(", ")));
+        for &(a, tier) in &fused {
+            let what = if tier >= MAX_ARTIFACT_TIER { "is now Legendary!".to_string() } else { format!("fused to tier {tier}!") };
+            self.say(&format!("{} {what}", a.name()));
+        }
+        fused
+    }
+
+    /// Debug: an account with every support and artifacts at every tier, and
+    /// a legendary Chain Link holding Pierce.
+    pub fn demo_collection(&mut self) {
+        for s in SupportKind::ALL {
+            self.account.add(Loot::Support(s));
+        }
+        for (i, a) in ArtifactKind::ALL.into_iter().enumerate() {
+            for _ in 0..(i % 6) * 3 {
+                self.account.add(Loot::Artifact(a, 1));
+            }
+        }
+        self.account.add(Loot::Artifact(ArtifactKind::ChainLink, MAX_ARTIFACT_TIER));
+        self.sandbox = false;
+        self.build.artifacts.clear();
+        self.character.level = 12;
+        self.sync_character();
+        self.build.place_artifact(ArtifactKind::ChainLink, 0);
+        self.build.place_artifact(ArtifactKind::VenomGland, 1);
+        self.build.socket_artifact(ArtifactKind::ChainLink, SupportKind::Pierce);
+        self.tab = Tab::Loadout;
+    }
+
+    /// A map with this character's build, tier and collection.
+    pub fn new_world(&self, seed: u64) -> World {
+        World::new(self.build.clone(), seed, self.tier)
+            .with_owned_supports(self.account.supports.clone())
+            .with_maxed_artifacts(self.account.maxed_artifacts())
     }
 
     /// A message at the bottom of the screen; messages arriving together chain.
@@ -286,7 +353,7 @@ impl Planner {
     pub fn record_victory(&mut self, tier: u32) {
         if let Some(unlocked) = self.account.record_victory(tier) {
             self.save_account();
-            self.say(&format!("Tier {unlocked} unlocked!"));
+            self.say(&format!("Map tier {unlocked} unlocked!"));
         }
     }
 
@@ -325,8 +392,8 @@ impl Planner {
         }
         // Map tier: like Diablo's difficulties, unlocked one by one by beating the boss.
         self.tier = self.tier.clamp(1, self.account.max_tier);
-        ui.text(&format!("Tier {}", self.tier), w - 560.0, 38.0, 22, TEXT);
-        ui.text(&format!("max {}", self.account.max_tier), w - 560.0, 58.0, 13, MUTED);
+        ui.text(&format!("Map tier {}", self.tier), w - 600.0, 38.0, 22, TEXT);
+        ui.text(&format!("max {}", self.account.max_tier), w - 600.0, 58.0, 13, MUTED);
         if ui.button(Rect::new(w - 480.0, 20.0, 34.0, 34.0), "-", self.tier > 1, false) {
             self.tier -= 1;
         }
@@ -335,15 +402,16 @@ impl Planner {
             self.tier += 1;
         }
         let t = tier_scaling(self.tier);
+        let drops = arpg_machine::account::max_drop_tier(self.tier);
         let info = if self.tier == 1 {
-            "Base difficulty".to_string()
+            "Base difficulty · artifacts drop at T1".to_string()
         } else {
-            format!("Enemies ×{:.1} HP, ×{:.1} dmg · ×{:.2} XP", t.health, t.damage, t.xp)
+            format!("Enemies ×{:.1} HP, ×{:.1} dmg · ×{:.2} XP · artifacts up to T{drops}", t.health, t.damage, t.xp)
         };
         ui.text(&info, w - 480.0, 70.0, 12, MUTED);
         let hover_plus = Rect::new(w - 440.0, 20.0, 34.0, 34.0).contains(crate::ui::mouse());
         if hover_plus && !can_raise {
-            ui.text(&format!("Beat the Tier {} boss to unlock Tier {}", self.tier, self.tier + 1), w - 560.0, 94.0, 14, ACCENT);
+            ui.text(&format!("Beat the map tier {} boss to unlock tier {}", self.tier, self.tier + 1), w - 600.0, 94.0, 14, ACCENT);
         }
         let can_play = !self.build.slots.is_empty() && self.build.is_valid();
         let label = if can_play { "Play (Enter)" } else { "Add a spell first" };
@@ -679,6 +747,23 @@ impl Planner {
         Rect::new(slot.x + 6.0, slot.bottom() - 42.0, slot.w - 12.0, 36.0)
     }
 
+    /// The support socket of a legendary artifact on the bar.
+    fn artifact_socket_rect(card: Rect) -> Rect {
+        Rect::new(card.x + 6.0, card.bottom() - 26.0, card.w - 12.0, 22.0)
+    }
+
+    /// Bar cards of legendary artifacts that take a support, with their index.
+    fn socketed_artifacts(&self) -> Vec<(usize, Rect)> {
+        self.artifact_slot_rects()
+            .into_iter()
+            .enumerate()
+            .filter(|&(i, _)| {
+                let a = self.build.artifacts[i];
+                self.build.is_legendary(a) && a.has_legendary_socket()
+            })
+            .collect()
+    }
+
     fn artifact_slot_rects(&self) -> Vec<Rect> {
         let mut x = BAR_X;
         self.build
@@ -715,6 +800,13 @@ impl Planner {
             }
             if r.contains(mouse) {
                 return Some((Item::Spell(self.build.slots[i].spell), Source::Bar));
+            }
+        }
+        for (i, r) in self.socketed_artifacts() {
+            if Self::artifact_socket_rect(r).contains(mouse) {
+                if let Some(s) = self.build.artifact_socket(self.build.artifacts[i]) {
+                    return Some((Item::Support(s), Source::ArtifactSocket));
+                }
             }
         }
         for (i, r) in self.artifact_slot_rects().into_iter().enumerate() {
@@ -760,15 +852,23 @@ impl Planner {
             }
             Item::Support(support) => {
                 let target = self.bar_slot_rects().iter().position(|r| r.contains(mouse));
-                match target {
-                    Some(i) => {
+                let artifact = self.artifact_slot_rects().iter().position(|r| r.contains(mouse)).map(|i| self.build.artifacts[i]);
+                match (target, artifact) {
+                    (Some(i), _) => {
                         let spell = self.build.slots[i].spell;
                         if !self.build.socket(i, support) {
                             self.say(&format!("{} does not fit {}.", support.name(), spell.name()));
                         }
                     }
-                    None if source == Source::Socket => self.build.unsocket(support),
-                    None => {}
+                    (None, Some(a)) => {
+                        if !self.build.is_legendary(a) {
+                            self.say(&format!("Only a legendary {} has a support socket.", a.name()));
+                        } else if !self.build.socket_artifact(a, support) {
+                            self.say(&format!("{} does not fit {}.", support.name(), a.name()));
+                        }
+                    }
+                    _ if matches!(source, Source::Socket | Source::ArtifactSocket) => self.build.unsocket(support),
+                    _ => {}
                 }
             }
             Item::Artifact(artifact) => {
@@ -843,6 +943,15 @@ impl Planner {
                 } else {
                     self.drag = Some(Drag { item, source, start: mouse, active: false });
                 }
+            }
+        }
+        // Right-click takes a card off its bar or socket.
+        if is_mouse_button_pressed(MouseButton::Right) && self.drag.is_none() {
+            match self.pick(mouse) {
+                Some((Item::Spell(spell), Source::Bar)) => self.build.remove_spell(spell),
+                Some((Item::Support(s), Source::Socket | Source::ArtifactSocket)) => self.build.unsocket(s),
+                Some((Item::Artifact(a), Source::ArtifactBar)) => self.build.remove_artifact(a),
+                _ => {}
             }
         }
         if let Some(drag) = &mut self.drag {
@@ -961,11 +1070,32 @@ impl Planner {
         let art_rects = self.artifact_slot_rects();
         for (i, r) in art_rects.iter().enumerate() {
             let a = self.build.artifacts[i];
+            let tier = self.build.tier(a);
             let lifted = dragging == Some((Item::Artifact(a), Source::ArtifactBar));
             draw_rectangle(r.x, r.y, r.w, r.h, if lifted { Color::new(0.05, 0.05, 0.07, 1.0) } else { Color::new(0.12, 0.1, 0.07, 1.0) });
-            draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.5, 0.4, 0.2, 1.0));
-            ui.wrapped(a.name(), r.x + 8.0, r.y + 24.0, r.w - 16.0, 15, if lifted { MUTED } else { TEXT });
-            ui.text(&format!("size {}", a.size()), r.x + 8.0, r.bottom() - 10.0, 12, MUTED);
+            draw_rectangle(r.x, r.y, r.w, 4.0, tier_color(tier));
+            let legendary = self.build.is_legendary(a);
+            draw_rectangle_lines(r.x, r.y, r.w, r.h, if legendary { 2.0 } else { 1.0 }, if legendary { tier_color(tier) } else { Color::new(0.5, 0.4, 0.2, 1.0) });
+            ui.wrapped(a.name(), r.x + 8.0, r.y + 22.0, r.w - 16.0, 15, if lifted { MUTED } else { TEXT });
+            let label_y = if legendary && a.has_legendary_socket() { r.y + 60.0 } else { r.y + 66.0 };
+            ui.text(&tier_label(tier), r.x + 8.0, label_y, 12, tier_color(tier));
+            if legendary && a.has_legendary_socket() {
+                let s = Self::artifact_socket_rect(*r);
+                let highlight = match dragging {
+                    Some((Item::Support(sup), _)) => Some(if a.socket_fits(sup) { GOOD } else { DANGER }),
+                    _ => None,
+                };
+                draw_rectangle(s.x, s.y, s.w, s.h, Color::new(0.04, 0.045, 0.06, 1.0));
+                draw_rectangle_lines(s.x, s.y, s.w, s.h, if highlight.is_some() { 2.0 } else { 1.0 }, highlight.unwrap_or(BORDER));
+                match self.build.artifact_socket(a) {
+                    Some(sup) if dragging != Some((Item::Support(sup), Source::ArtifactSocket)) => {
+                        ui.text(sup.name(), s.x + 4.0, s.y + 16.0, 12, ACCENT)
+                    }
+                    _ => ui.text("support", s.x + 6.0, s.y + 16.0, 12, Color::new(0.35, 0.37, 0.44, 1.0)),
+                }
+            } else {
+                ui.text(&format!("size {}", a.size()), r.x + 8.0, r.bottom() - 10.0, 12, MUTED);
+            }
         }
         if let Some((Item::Artifact(_), _)) = dragging {
             if self.artifact_zone().contains(mouse) {
@@ -981,7 +1111,7 @@ impl Planner {
             ui,
             "Drag and drop",
             "Spells go on the spell bar, supports in a spell's socket, artifacts on the artifact bar.",
-            "Hover any card to read it. Click a spell or artifact to add it at the end. Drag a card off its bar to remove it, or along it to reorder.",
+            "Hover any card to read it. Click a spell or artifact to add it at the end. Drag a card along its bar to reorder, or right-click it (or drag it off) to remove it.",
             details,
         );
 
@@ -1005,7 +1135,7 @@ impl Planner {
         ui.text("drag onto a spell's socket", rx + 100.0, LIST_Y - 16.0, 14, MUTED);
         for (i, s) in SupportKind::ALL.into_iter().enumerate() {
             let r = Self::support_rect(i);
-            let used_on = self.build.slots.iter().find(|slot| slot.support == Some(s)).map(|slot| slot.spell);
+            let used_on = self.support_place(s);
             let owned = self.owns_support(s);
             let hover = r.contains(mouse) && dragging.is_none();
             let fill = if !owned { Color::new(0.05, 0.055, 0.07, 0.9) } else if hover { PANEL_HOVER } else { PANEL };
@@ -1016,7 +1146,7 @@ impl Planner {
             let sub = if !owned {
                 "not found yet".to_string()
             } else {
-                used_on.map_or_else(|| "available".to_string(), |spell| format!("on {}", spell.name()))
+                used_on.map_or_else(|| "available".to_string(), |place| format!("on {place}"))
             };
             ui.text(&sub, r.x + 12.0, r.y + 39.0, 13, if !owned { dim } else if used_on.is_some() { GOOD } else { MUTED });
         }
@@ -1029,7 +1159,7 @@ impl Planner {
         for (a, r) in Self::artifact_order().into_iter().zip(artifact_rects) {
             let equipped = self.build.has_artifact(a);
             let owned = self.owns_artifact(a);
-            let copies = self.account.artifact_copies(a);
+            let tier = self.build.tier(a);
             let hover = r.contains(mouse) && dragging.is_none();
             let fill = if !owned {
                 Color::new(0.05, 0.05, 0.05, 0.9)
@@ -1042,14 +1172,25 @@ impl Planner {
             draw_rectangle_lines(r.x, r.y, r.w, r.h, 1.0, Color::new(0.35, 0.3, 0.2, 1.0));
             let dim = Color::new(0.35, 0.33, 0.3, 1.0);
             ui.text(a.name(), r.x + 8.0, r.y + 20.0, 14, if !owned { dim } else if equipped { MUTED } else { TEXT });
-            let count = if copies > 1 && !self.sandbox { format!(" · ×{copies}") } else { String::new() };
+            if owned {
+                draw_rectangle(r.x, r.y, 4.0, r.h, tier_color(tier));
+                let t = format!("T{tier}");
+                ui.text(&t, r.right() - ui.width(&t, 12) - 6.0, r.y + 39.0, 12, tier_color(tier));
+                // Fusion progress toward the next tier.
+                if let Some((have, need)) = self.account.artifact_progress(a) {
+                    let w = r.w - 8.0;
+                    draw_rectangle(r.x + 4.0, r.bottom() - 4.0, w, 2.0, Color::new(0.2, 0.2, 0.2, 1.0));
+                    draw_rectangle(r.x + 4.0, r.bottom() - 4.0, w * have as f32 / need as f32, 2.0, tier_color(tier + 1));
+                }
+            }
             let sub = if !owned {
-                "not found yet".to_string()
+                "not found yet"
             } else if equipped {
-                format!("equipped{count}")
+                "equipped"
             } else {
-                format!("size {}{count}", a.size())
+                ""
             };
+            let sub = if sub.is_empty() { format!("size {}", a.size()) } else { sub.to_string() };
             ui.text(&sub, r.x + 8.0, r.y + 39.0, 12, if !owned { dim } else if equipped { GOOD } else { MUTED });
         }
 
@@ -1058,7 +1199,7 @@ impl Planner {
             let (name, color) = match item {
                 Item::Spell(s) => (s.name(), family_color(s.family())),
                 Item::Support(s) => (s.name(), ACCENT),
-                Item::Artifact(a) => (a.name(), Color::new(0.8, 0.6, 0.3, 1.0)),
+                Item::Artifact(a) => (a.name(), tier_color(self.build.tier(a))),
             };
             let r = Rect::new(mouse.x - 80.0, mouse.y - 22.0, 160.0, 44.0);
             draw_rectangle(r.x, r.y, r.w, r.h, Color::new(0.14, 0.15, 0.2, 0.92));
@@ -1072,6 +1213,16 @@ impl Planner {
         }
     }
 
+    /// Where a support is socketed: a spell or a legendary artifact.
+    fn support_place(&self, support: SupportKind) -> Option<&'static str> {
+        self.build
+            .slots
+            .iter()
+            .find(|s| s.support == Some(support))
+            .map(|s| s.spell.name())
+            .or_else(|| self.build.artifact_sockets.iter().find(|&&(_, s)| s == support).map(|(a, _)| a.name()))
+    }
+
     /// Tooltip for a loadout card, with what you can do with it from where it is.
     fn item_tip(&self, item: Item, source: Source) -> Tooltip {
         match item {
@@ -1081,7 +1232,7 @@ impl Planner {
                         let support = self.build.slots.iter().find(|s| s.spell == spell).and_then(|s| s.support);
                         let socket = support
                             .map_or("No support yet: drag one onto its socket.".to_string(), |s| format!("Support: {}.", s.name()));
-                        (format!("{socket} Drag along the bar to reorder, or off it to remove."), GOOD)
+                        (format!("{socket} Drag along the bar to reorder; right-click or drag it off to remove."), GOOD)
                     }
                     _ if self.build.contains(spell) => ("Already on your bar.".to_string(), GOOD),
                     _ if self.build.used() + spell.size() > self.build.capacity => (
@@ -1093,16 +1244,25 @@ impl Planner {
                 Tooltip { footer: Some(footer), ..spell_tip(spell) }
             }
             Item::Support(support) => {
-                let used_on = self.build.slots.iter().find(|s| s.support == Some(support)).map(|s| s.spell);
+                let used_on = self.support_place(support);
                 let footer = match (source, used_on) {
                     _ if !self.owns_support(support) => {
                         ("Not found yet: drops from monsters and bosses, once per account.".to_string(), MUTED)
                     }
-                    (Source::Socket, _) => ("Drag it to another socket, or off the bar to remove it.".to_string(), GOOD),
-                    (_, Some(spell)) => (format!("On {}. Dragging it elsewhere moves it.", spell.name()), GOOD),
+                    (Source::Socket | Source::ArtifactSocket, _) => {
+                        ("Drag it to another socket, or off the bar to remove it. Right-click removes it.".to_string(), GOOD)
+                    }
+                    (_, Some(place)) => (format!("On {place}. Dragging it elsewhere moves it."), GOOD),
                     _ => {
-                        let fits: Vec<&str> =
+                        let mut fits: Vec<&str> =
                             self.build.slots.iter().filter(|s| support.fits(s.spell)).map(|s| s.spell.name()).collect();
+                        fits.extend(
+                            self.build
+                                .artifacts
+                                .iter()
+                                .filter(|&&a| self.build.is_legendary(a) && a.socket_fits(support))
+                                .map(|a| a.name()),
+                        );
                         if fits.is_empty() {
                             ("No spell on your bar can take it.".to_string(), DANGER)
                         } else {
@@ -1114,14 +1274,32 @@ impl Planner {
                     title: support.name().to_string(),
                     color: ACCENT,
                     subtitle: "Support · once per build".to_string(),
-                    body: support.description().to_string(),
+                    body: {
+                        let homes: Vec<&str> =
+                            ArtifactKind::ALL.into_iter().filter(|a| a.socket_fits(support)).map(|a| a.name()).collect();
+                        if homes.is_empty() {
+                            support.description().to_string()
+                        } else {
+                            format!(
+                                "{}\n\nA legendary {} can hold it: it then works on every spell of your bar it fits.",
+                                support.description(),
+                                homes.join(" or ")
+                            )
+                        }
+                    },
                     footer: Some(footer),
                 }
             }
             Item::Artifact(artifact) => {
                 let footer = match source {
                     _ if !self.owns_artifact(artifact) => ("Not found yet: drops from monsters and bosses.".to_string(), MUTED),
-                    Source::ArtifactBar => ("Equipped. Drag along the bar to reorder, or off it to remove.".to_string(), GOOD),
+                    Source::ArtifactBar if self.build.is_legendary(artifact) && artifact.has_legendary_socket() => (
+                        "Equipped. Drag a matching support onto its socket. Right-click or drag it off the bar to remove it.".to_string(),
+                        GOOD,
+                    ),
+                    Source::ArtifactBar => {
+                        ("Equipped. Drag along the bar to reorder; right-click or drag it off to remove.".to_string(), GOOD)
+                    }
                     _ if self.build.has_artifact(artifact) => ("Equipped.".to_string(), GOOD),
                     _ if self.build.artifacts_used() + artifact.size() > self.build.artifact_capacity => (
                         format!(
@@ -1133,11 +1311,30 @@ impl Planner {
                     ),
                     _ => ("Click to equip, or drag it onto the artifact bar.".to_string(), TEXT),
                 };
+                let tier = self.build.tier(artifact);
+                let mut body = artifact.description(tier);
+                if tier < MAX_ARTIFACT_TIER {
+                    body += &format!("\n\n{}: {}", tier_label(tier + 1), artifact.description(tier + 1));
+                    if let Some((have, need)) = self.account.artifact_progress(artifact) {
+                        body += &format!(
+                            "\nFusion: {have} / {need} copies. Two copies of a tier fuse into the next, on their own."
+                        );
+                    }
+                }
+                let socket_fits: Vec<&str> =
+                    SupportKind::ALL.into_iter().filter(|&s| artifact.socket_fits(s)).map(|s| s.name()).collect();
+                if !socket_fits.is_empty() {
+                    let lead = if tier >= MAX_ARTIFACT_TIER { "Socket" } else { "At Legendary, a socket" };
+                    body += &format!(
+                        "\n\n{lead}: holds {}, which then works on every spell of your bar it fits.",
+                        socket_fits.join(" or ")
+                    );
+                }
                 Tooltip {
                     title: artifact.name().to_string(),
-                    color: Color::new(0.85, 0.65, 0.35, 1.0),
-                    subtitle: format!("Artifact · size {}", artifact.size()),
-                    body: artifact.description().to_string(),
+                    color: tier_color(tier),
+                    subtitle: format!("Artifact · {} · size {}", tier_label(tier), artifact.size()),
+                    body,
                     footer: Some(footer),
                 }
             }

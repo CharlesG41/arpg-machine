@@ -1,7 +1,7 @@
 //! Account-wide progress that outlives characters: the highest map tier
 //! unlocked and the collection of supports and artifacts found. Saved as a
 //! small text file in the home directory.
-use crate::content::{ArtifactKind, Loot, SupportKind};
+use crate::content::{ArtifactKind, Loot, SupportKind, MAX_ARTIFACT_TIER};
 use std::path::PathBuf;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -10,7 +10,9 @@ pub struct Account {
     pub max_tier: u32,
     /// Supports are unlocks: found once, usable by every character.
     pub supports: Vec<SupportKind>,
-    /// Artifacts found, with how many copies (copies will feed fusion).
+    /// Artifacts found, each with its worth in tier-1 copies. Copies fuse on
+    /// their own: two of a tier make one of the next, so a worth of 5 is a
+    /// tier-3 copy plus a tier-1 copy, and the artifact is tier 3.
     pub artifacts: Vec<(ArtifactKind, u32)>,
 }
 
@@ -47,9 +49,9 @@ impl Account {
                 "artifact" => {
                     let (name, count) = value.rsplit_once(':').unwrap_or((value, "1"));
                     if let Some(a) = ArtifactKind::ALL.into_iter().find(|a| a.name() == name) {
-                        account.add(Loot::Artifact(a));
+                        account.add(Loot::Artifact(a, 1));
                         if let Some(entry) = account.artifacts.iter_mut().find(|(k, _)| *k == a) {
-                            entry.1 = count.parse().unwrap_or(1).max(1);
+                            entry.1 = count.parse().unwrap_or(1).clamp(1, MAX_WORTH);
                         }
                     }
                 }
@@ -98,23 +100,66 @@ impl Account {
         self.supports.contains(&support)
     }
 
-    pub fn artifact_copies(&self, artifact: ArtifactKind) -> u32 {
+    /// The artifact's worth in tier-1 copies (0 if never found).
+    pub fn artifact_worth(&self, artifact: ArtifactKind) -> u32 {
         self.artifacts.iter().find(|(a, _)| *a == artifact).map_or(0, |(_, n)| *n)
     }
 
-    pub fn add(&mut self, loot: Loot) {
+    /// Best tier you own, 0 if none.
+    pub fn artifact_tier(&self, artifact: ArtifactKind) -> u8 {
+        tier_of(self.artifact_worth(artifact))
+    }
+
+    /// Progress toward the next tier: (worth, worth needed). None at the top.
+    pub fn artifact_progress(&self, artifact: ArtifactKind) -> Option<(u32, u32)> {
+        let tier = self.artifact_tier(artifact);
+        (tier > 0 && tier < MAX_ARTIFACT_TIER).then(|| (self.artifact_worth(artifact), 1 << tier))
+    }
+
+    /// Artifacts already legendary: more copies would be wasted, so they no
+    /// longer drop.
+    pub fn maxed_artifacts(&self) -> Vec<ArtifactKind> {
+        self.artifacts.iter().filter(|&&(_, n)| n >= MAX_WORTH).map(|&(a, _)| a).collect()
+    }
+
+    /// Adds a drop. Returns the artifact's new tier if the copy fused it up.
+    pub fn add(&mut self, loot: Loot) -> Option<u8> {
         match loot {
             Loot::Support(s) => {
                 if !self.supports.contains(&s) {
                     self.supports.push(s);
                 }
+                None
             }
-            Loot::Artifact(a) => match self.artifacts.iter_mut().find(|(k, _)| *k == a) {
-                Some(entry) => entry.1 += 1,
-                None => self.artifacts.push((a, 1)),
-            },
+            Loot::Artifact(a, tier) => {
+                let before = self.artifact_tier(a);
+                let worth = 1u32 << (tier.clamp(1, MAX_ARTIFACT_TIER) - 1);
+                match self.artifacts.iter_mut().find(|(k, _)| *k == a) {
+                    Some(entry) => entry.1 = (entry.1 + worth).min(MAX_WORTH),
+                    None => self.artifacts.push((a, worth)),
+                }
+                let after = self.artifact_tier(a);
+                (before > 0 && after > before).then_some(after)
+            }
         }
     }
+}
+
+/// Worth of a legendary copy: 2⁴ tier-1 copies.
+pub const MAX_WORTH: u32 = 1 << (MAX_ARTIFACT_TIER - 1);
+
+fn tier_of(worth: u32) -> u8 {
+    if worth == 0 {
+        0
+    } else {
+        ((u32::BITS - worth.leading_zeros()) as u8).min(MAX_ARTIFACT_TIER)
+    }
+}
+
+/// Highest artifact tier that drops on a map tier: 1 on tiers 1–2, 2 on 3–4,
+/// up to legendary from tier 9.
+pub fn max_drop_tier(map_tier: u32) -> u8 {
+    (1 + (map_tier.max(1) - 1) / 2).min(MAX_ARTIFACT_TIER as u32) as u8
 }
 
 /// How much harder a tier is than tier 1, and how much more experience it gives.
@@ -150,9 +195,9 @@ mod tests {
     fn saves_and_parses() {
         let mut account = Account { max_tier: 7, ..Account::default() };
         account.add(Loot::Support(SupportKind::Hunter));
-        account.add(Loot::Artifact(ArtifactKind::SagesRing));
-        account.add(Loot::Artifact(ArtifactKind::SagesRing));
-        assert_eq!(account.artifact_copies(ArtifactKind::SagesRing), 2);
+        account.add(Loot::Artifact(ArtifactKind::SagesRing, 1));
+        account.add(Loot::Artifact(ArtifactKind::SagesRing, 1));
+        assert_eq!(account.artifact_worth(ArtifactKind::SagesRing), 2);
         assert_eq!(Account::parse(&account.to_text()), account);
         assert_eq!(Account::parse("garbage"), Account::default());
     }
@@ -163,6 +208,29 @@ mod tests {
         account.add(Loot::Support(SupportKind::Echo));
         account.add(Loot::Support(SupportKind::Echo));
         assert_eq!(account.supports, vec![SupportKind::Echo]);
+    }
+
+    #[test]
+    fn copies_fuse_up_to_legendary() {
+        let mut account = Account::default();
+        let ring = ArtifactKind::SagesRing;
+        assert_eq!(account.add(Loot::Artifact(ring, 1)), None, "a first copy is not a fusion");
+        assert_eq!(account.artifact_tier(ring), 1);
+        assert_eq!(account.add(Loot::Artifact(ring, 1)), Some(2));
+        assert_eq!(account.add(Loot::Artifact(ring, 1)), None);
+        assert_eq!(account.artifact_progress(ring), Some((3, 4)));
+        assert_eq!(account.add(Loot::Artifact(ring, 1)), Some(3));
+        assert_eq!(account.add(Loot::Artifact(ring, 4)), Some(4), "a tier-4 drop is worth 8 copies");
+        assert_eq!(account.artifact_tier(ring), 4);
+        account.add(Loot::Artifact(ring, 5));
+        assert_eq!(account.artifact_tier(ring), MAX_ARTIFACT_TIER);
+        assert_eq!(account.artifact_progress(ring), None);
+        assert_eq!(account.maxed_artifacts(), vec![ring]);
+    }
+
+    #[test]
+    fn harder_maps_drop_better_artifacts() {
+        assert_eq!((1..=10).map(max_drop_tier).collect::<Vec<_>>(), vec![1, 1, 2, 2, 3, 3, 4, 4, 5, 5]);
     }
 
     #[test]

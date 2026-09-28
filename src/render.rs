@@ -67,7 +67,18 @@ pub fn side_arrows(r: Rect, sides: (bool, bool), scale: f32) {
 pub fn loot_color(loot: Loot) -> Color {
     match loot {
         Loot::Support(_) => Color::new(1.0, 0.84, 0.35, 1.0),
-        Loot::Artifact(_) => Color::new(1.0, 0.55, 0.22, 1.0),
+        Loot::Artifact(_, tier) => tier_color(tier),
+    }
+}
+
+/// Artifact tiers, ARPG-style: white, green, blue, purple, legendary orange.
+pub fn tier_color(tier: u8) -> Color {
+    match tier {
+        0 | 1 => Color::new(0.85, 0.82, 0.76, 1.0),
+        2 => Color::new(0.45, 0.85, 0.4, 1.0),
+        3 => Color::new(0.35, 0.6, 1.0, 1.0),
+        4 => Color::new(0.72, 0.45, 1.0, 1.0),
+        _ => Color::new(1.0, 0.55, 0.15, 1.0),
     }
 }
 

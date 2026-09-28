@@ -902,7 +902,30 @@ pub enum ArtifactKind {
     ChainLink,
 }
 
+/// Artifacts go from tier 1 to 5; two copies of a tier fuse into the next.
+/// Tier 5 is legendary.
+pub const MAX_ARTIFACT_TIER: u8 = 5;
+
+/// How much each tier multiplies an artifact's numbers: ×1, ×1.5, ×2, ×2.5, ×3.
+pub fn tier_mult(tier: u8) -> f32 {
+    1.0 + 0.5 * (tier.clamp(1, MAX_ARTIFACT_TIER) - 1) as f32
+}
+
+/// Whole-number bonuses (extra jumps, momentum per kill): 1, 1, 2, 2, 3.
+pub fn tier_count(tier: u8) -> u8 {
+    (tier.clamp(1, MAX_ARTIFACT_TIER) + 1) / 2
+}
+
+pub fn tier_label(tier: u8) -> String {
+    if tier >= MAX_ARTIFACT_TIER {
+        "Legendary".into()
+    } else {
+        format!("Tier {tier}")
+    }
+}
+
 impl ArtifactKind {
+    pub const COUNT: usize = 16;
     pub const ALL: [ArtifactKind; 16] = [
         ArtifactKind::SagesRing,
         ArtifactKind::Warband,
@@ -943,25 +966,72 @@ impl ArtifactKind {
         }
     }
 
-    pub fn description(self) -> &'static str {
+    pub fn index(self) -> usize {
+        self as usize
+    }
+
+    /// The number the effect scales at `tier`: AP, percent bonus, Health...
+    pub fn value(self, tier: u8) -> f32 {
+        let base = match self {
+            ArtifactKind::SagesRing | ArtifactKind::Warband | ArtifactKind::StormBattery | ArtifactKind::QuickBoots => 15.0,
+            ArtifactKind::IronPlate | ArtifactKind::SpiritVeil | ArtifactKind::WideLens | ArtifactKind::BarrierCharm => 25.0,
+            ArtifactKind::EmberHeart | ArtifactKind::HuntersLens => 30.0,
+            ArtifactKind::VenomGland | ArtifactKind::FrostSigil => 20.0,
+            ArtifactKind::Bloodstone => 100.0,
+            ArtifactKind::SoulSiphon => 2.0,
+            ArtifactKind::MomentumEngine | ArtifactKind::ChainLink => return tier_count(tier) as f32,
+        };
+        base * tier_mult(tier)
+    }
+
+    pub fn description(self, tier: u8) -> String {
+        let v = self.value(tier);
         match self {
-            ArtifactKind::SagesRing => "+15 AP.",
-            ArtifactKind::Warband => "+15 AD.",
-            ArtifactKind::IronPlate => "+25 PR (physical resistance).",
-            ArtifactKind::SpiritVeil => "+25 MR (magic resistance).",
-            ArtifactKind::EmberHeart => "Burn deals 30% more damage.",
-            ArtifactKind::VenomGland => "Poison lasts 2 s longer and deals 20% more damage.",
-            ArtifactKind::FrostSigil => "Chilled enemies take 20% more damage.",
-            ArtifactKind::StormBattery => "+15% cooldown rate.",
-            ArtifactKind::HuntersLens => "+30% damage to rares and bosses.",
-            ArtifactKind::Bloodstone => "+100 maximum Health.",
-            ArtifactKind::SoulSiphon => "Heal 1 Health per kill.",
-            ArtifactKind::MomentumEngine => "Every kill grants 1 momentum, from any spell (max 20, drops after 2 s without a kill).",
-            ArtifactKind::WideLens => "+25% area for all spells.",
-            ArtifactKind::QuickBoots => "+15% movement speed. Dash cooldown −0.5 s.",
-            ArtifactKind::BarrierCharm => "Gain 25 Barrier when you dash. Barrier absorbs damage.",
-            ArtifactKind::ChainLink => "Chains jump 1 more time. Projectiles pierce 1 more enemy.",
+            ArtifactKind::SagesRing => format!("+{v:.0} AP."),
+            ArtifactKind::Warband => format!("+{v:.0} AD."),
+            ArtifactKind::IronPlate => format!("+{v:.0} PR (physical resistance)."),
+            ArtifactKind::SpiritVeil => format!("+{v:.0} MR (magic resistance)."),
+            ArtifactKind::EmberHeart => format!("Burn deals {v:.0}% more damage."),
+            ArtifactKind::VenomGland => {
+                format!("Poison lasts {:.0} s longer and deals {v:.0}% more damage.", 2.0 * tier_mult(tier))
+            }
+            ArtifactKind::FrostSigil => format!("Chilled enemies take {v:.0}% more damage."),
+            ArtifactKind::StormBattery => format!("+{v:.0}% cooldown rate."),
+            ArtifactKind::HuntersLens => format!("+{v:.0}% damage to rares and bosses."),
+            ArtifactKind::Bloodstone => format!("+{v:.0} maximum Health."),
+            ArtifactKind::SoulSiphon => format!("Heal {v:.0} Health per kill."),
+            ArtifactKind::MomentumEngine => format!(
+                "Every kill grants {v:.0} momentum, from any spell (max 20, drops after 2 s without a kill)."
+            ),
+            ArtifactKind::WideLens => format!("+{v:.0}% area for all spells."),
+            ArtifactKind::QuickBoots => format!("+{v:.0}% movement speed. Dash cooldown −0.5 s."),
+            ArtifactKind::BarrierCharm => format!("Gain {v:.0} Barrier when you dash. Barrier absorbs damage."),
+            ArtifactKind::ChainLink => {
+                let s = if v > 1.0 { "s" } else { "" };
+                format!("Chains jump {v:.0} more time{s}. Projectiles pierce {v:.0} more enem{}.", if v > 1.0 { "ies" } else { "y" })
+            }
         }
+    }
+
+    /// Supports a legendary (tier 5) copy can hold: the ones that share its
+    /// theme. A support there works on every spell of the bar it fits.
+    pub fn socket_fits(self, support: SupportKind) -> bool {
+        use ArtifactKind::*;
+        use SupportKind::*;
+        matches!(
+            (self, support),
+            (ChainLink, Multishot | Pierce)
+                | (WideLens, Amplify)
+                | (EmberHeart, Combustion)
+                | (VenomGland, Contagion)
+                | (HuntersLens, Hunter)
+                | (StormBattery, Frenzy)
+        )
+    }
+
+    /// Whether the legendary tier comes with a support socket.
+    pub fn has_legendary_socket(self) -> bool {
+        SupportKind::ALL.into_iter().any(|s| self.socket_fits(s))
     }
 
     /// Artifact capacity it takes (God Tower sizes).
@@ -977,21 +1047,24 @@ impl ArtifactKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Loot {
     Support(SupportKind),
-    Artifact(ArtifactKind),
+    /// An artifact and the tier it dropped at.
+    Artifact(ArtifactKind, u8),
 }
 
 impl Loot {
-    pub fn name(self) -> &'static str {
+    pub fn name(self) -> String {
         match self {
-            Loot::Support(s) => s.name(),
-            Loot::Artifact(a) => a.name(),
+            Loot::Support(s) => s.name().into(),
+            Loot::Artifact(a, 1) => a.name().into(),
+            Loot::Artifact(a, tier) if tier >= MAX_ARTIFACT_TIER => format!("Legendary {}", a.name()),
+            Loot::Artifact(a, tier) => format!("{} T{tier}", a.name()),
         }
     }
 
     pub fn kind_name(self) -> &'static str {
         match self {
             Loot::Support(_) => "Support",
-            Loot::Artifact(_) => "Artifact",
+            Loot::Artifact(..) => "Artifact",
         }
     }
 }
@@ -1010,6 +1083,10 @@ pub struct Build {
     pub capacity: u8,
     pub artifacts: Vec<ArtifactKind>,
     pub artifact_capacity: u8,
+    /// Tier of each artifact (by `ArtifactKind::index`), from the account.
+    pub tiers: [u8; ArtifactKind::COUNT],
+    /// Supports socketed into legendary artifacts.
+    pub artifact_sockets: Vec<(ArtifactKind, SupportKind)>,
 }
 
 impl Build {
@@ -1017,7 +1094,14 @@ impl Build {
     pub const ARTIFACT_CAPACITY: u8 = 5;
 
     pub fn new(slots: Vec<Slot>, artifacts: Vec<ArtifactKind>) -> Self {
-        Build { slots, capacity: Self::SPELL_CAPACITY, artifacts, artifact_capacity: Self::ARTIFACT_CAPACITY }
+        Build {
+            slots,
+            capacity: Self::SPELL_CAPACITY,
+            artifacts,
+            artifact_capacity: Self::ARTIFACT_CAPACITY,
+            tiers: [1; ArtifactKind::COUNT],
+            artifact_sockets: Vec::new(),
+        }
     }
 
     pub fn empty() -> Self {
@@ -1041,7 +1125,39 @@ impl Build {
     }
 
     pub fn support_used(&self, support: SupportKind) -> bool {
-        self.slots.iter().any(|s| s.support == Some(support))
+        self.slots.iter().any(|s| s.support == Some(support)) || self.artifact_sockets.iter().any(|&(_, s)| s == support)
+    }
+
+    pub fn tier(&self, artifact: ArtifactKind) -> u8 {
+        self.tiers[artifact.index()]
+    }
+
+    pub fn is_legendary(&self, artifact: ArtifactKind) -> bool {
+        self.tier(artifact) >= MAX_ARTIFACT_TIER
+    }
+
+    pub fn artifact_socket(&self, artifact: ArtifactKind) -> Option<SupportKind> {
+        self.artifact_sockets.iter().find(|&&(a, _)| a == artifact).map(|&(_, s)| s)
+    }
+
+    /// Sockets a support into an equipped legendary artifact that accepts it.
+    pub fn socket_artifact(&mut self, artifact: ArtifactKind, support: SupportKind) -> bool {
+        if !self.has_artifact(artifact) || !self.is_legendary(artifact) || !artifact.socket_fits(support) {
+            return false;
+        }
+        self.unsocket(support);
+        self.artifact_sockets.retain(|&(a, _)| a != artifact);
+        self.artifact_sockets.push((artifact, support));
+        true
+    }
+
+    /// Supports held by equipped legendary artifacts: each works on every
+    /// spell of the bar it fits.
+    pub fn granted_supports(&self) -> impl Iterator<Item = SupportKind> + '_ {
+        self.artifact_sockets
+            .iter()
+            .filter(|&&(a, s)| self.has_artifact(a) && self.is_legendary(a) && a.socket_fits(s))
+            .map(|&(_, s)| s)
     }
 
     /// Inserts a spell at `index`, or moves it there if it is already on the bar
@@ -1081,6 +1197,7 @@ impl Build {
                 slot.support = None;
             }
         }
+        self.artifact_sockets.retain(|&(_, s)| s != support);
     }
 
     /// Inserts an artifact at `index`, or moves it there if already equipped.
@@ -1100,6 +1217,7 @@ impl Build {
 
     pub fn remove_artifact(&mut self, artifact: ArtifactKind) {
         self.artifacts.retain(|&a| a != artifact);
+        self.artifact_sockets.retain(|&(a, _)| a != artifact);
     }
 
     pub fn is_valid(&self) -> bool {
@@ -1111,12 +1229,20 @@ impl Build {
             .all(|(i, a)| a.support.is_none() || self.slots[i + 1..].iter().all(|b| b.support != a.support));
         let fitting = self.slots.iter().all(|s| s.support.is_none_or(|sup| sup.fits(s.spell)));
         let unique_artifacts = self.artifacts.iter().enumerate().all(|(i, a)| !self.artifacts[i + 1..].contains(a));
+        let sockets_ok = self.artifact_sockets.iter().enumerate().all(|(i, &(a, s))| {
+            a.socket_fits(s)
+                && self.has_artifact(a)
+                && self.is_legendary(a)
+                && !self.slots.iter().any(|slot| slot.support == Some(s))
+                && self.artifact_sockets[i + 1..].iter().all(|&(b, t)| b != a && t != s)
+        });
         self.used() <= self.capacity
             && self.artifacts_used() <= self.artifact_capacity
             && unique_spells
             && unique_supports
             && fitting
             && unique_artifacts
+            && sockets_ok
     }
 }
 
@@ -1242,6 +1368,32 @@ mod tests {
         assert!(build.place_artifact(ArtifactKind::StormBattery, 1));
         assert!(build.place_artifact(ArtifactKind::Bloodstone, 2));
         assert!(!build.place_artifact(ArtifactKind::QuickBoots, 3));
+    }
+
+    #[test]
+    fn legendary_artifacts_hold_a_themed_support() {
+        let mut build = Build::empty();
+        build.place_spell(SpellId::named("Arcane Bolt"), 0);
+        build.place_artifact(ArtifactKind::ChainLink, 0);
+        assert!(!build.socket_artifact(ArtifactKind::ChainLink, SupportKind::Pierce), "tier 1 has no socket");
+        build.tiers[ArtifactKind::ChainLink.index()] = MAX_ARTIFACT_TIER;
+        assert!(!build.socket_artifact(ArtifactKind::ChainLink, SupportKind::Amplify), "off-theme");
+        build.socket(0, SupportKind::Pierce);
+        assert!(build.socket_artifact(ArtifactKind::ChainLink, SupportKind::Pierce));
+        assert_eq!(build.slots[0].support, None, "a support is used once per build");
+        assert_eq!(build.granted_supports().collect::<Vec<_>>(), vec![SupportKind::Pierce]);
+        assert!(build.is_valid());
+        build.remove_artifact(ArtifactKind::ChainLink);
+        assert!(build.artifact_sockets.is_empty());
+    }
+
+    #[test]
+    fn tiers_scale_artifacts() {
+        assert_eq!(ArtifactKind::SagesRing.value(1), 15.0);
+        assert_eq!(ArtifactKind::SagesRing.value(5), 45.0);
+        assert_eq!(ArtifactKind::ChainLink.value(3), 2.0);
+        assert!(ArtifactKind::ChainLink.description(5).contains("3 more times"));
+        assert!(ArtifactKind::ALL.iter().enumerate().all(|(i, a)| a.index() == i));
     }
 
     #[test]
